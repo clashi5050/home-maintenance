@@ -28,7 +28,7 @@ const { db } = await import('../server/db.js');
 const store = await import('../server/resources.js');
 
 test('upgrading a v1 database moves it to the current schema version', () => {
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
 });
 
 test('existing data survives the upgrade', () => {

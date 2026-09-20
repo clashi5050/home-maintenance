@@ -1,6 +1,7 @@
 // Push notifications via ntfy (https://ntfy.sh, or your own ntfy server).
 import { db, getSettings, saveSetting } from './db.js';
 import { addDays, pad, parse, prettyDate, today } from './dates.js';
+import { blockPrivateUrls, guardedPost } from './netguard.js';
 import { listAppliances, listMaintenance } from './resources.js';
 import { HttpError } from './validate.js';
 
@@ -12,19 +13,19 @@ export async function sendNtfy(settings, { title, message, priority = 3, tags = 
   const headers = { Title: title, Priority: String(priority), Tags: tags };
   if (settings.ntfy_token) headers.Authorization = `Bearer ${settings.ntfy_token}`;
   if (settings.app_url) headers.Click = settings.app_url; // tapping the notification opens the app
+  const target = `${base}/${encodeURIComponent(settings.ntfy_topic)}`;
 
   let res;
   try {
-    res = await fetch(`${base}/${encodeURIComponent(settings.ntfy_topic)}`, {
-      method: 'POST',
-      headers,
-      body: message,
-      signal: AbortSignal.timeout(10_000),
-    });
+    // On a shared deployment the address is typed in by users, so it must not reach internal networks.
+    res = blockPrivateUrls()
+      ? await guardedPost(target, { headers, body: message })
+      : await fetch(target, { method: 'POST', headers, body: message, signal: AbortSignal.timeout(10_000) });
   } catch (err) {
-    throw new HttpError(502, `Could not reach ${base}: ${err.cause?.code ?? err.message}`);
+    throw new HttpError(502, `Could not reach ${base}: ${err.cause?.code ?? err.code ?? err.message}`);
   }
-  if (!res.ok) throw new HttpError(502, `ntfy answered ${res.status} ${res.statusText}`.trim());
+  const ok = res.ok ?? (res.status >= 200 && res.status < 300); // guardedPost never follows redirects, so 3xx is a failure
+  if (!ok) throw new HttpError(502, `ntfy answered ${res.status} ${res.statusText}`.trim());
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;

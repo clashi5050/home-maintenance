@@ -13,6 +13,11 @@
     "test": "node --disable-warning=ExperimentalWarning --test"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.127.0"
+    "@anthropic-ai/sdk": "^0.127.0",
+    "@azure/identity": "^4.13.3",
+    "@azure/storage-blob": "^12.33.0"
+  },
+  "devDependencies": {
+    "azurite": "^3.37.0"
   }
 }

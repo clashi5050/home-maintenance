@@ -153,6 +153,19 @@ export const MIGRATIONS = [
     notes TEXT
   );
   `,
+
+  // v3: who changed what. Only filled in when people sign in with their own accounts.
+  `
+  CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL DEFAULT (datetime('now')),
+    actor TEXT NOT NULL,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status INTEGER NOT NULL
+  );
+  CREATE INDEX audit_log_at ON audit_log(at);
+  `,
 ];
 
 function migrate() {
@@ -170,6 +183,13 @@ function migrate() {
   }
 }
 migrate();
+
+db.prepare("DELETE FROM audit_log WHERE at < datetime('now', '-400 days')").run();
+
+/** Records that someone changed something. Keeps the request path and outcome, never the content. */
+export function recordAudit(actor, method, path, status) {
+  db.prepare('INSERT INTO audit_log (actor, method, path, status) VALUES (?, ?, ?, ?)').run(actor, method, path, status);
+}
 
 export const SETTING_DEFAULTS = {
   notifications_enabled: 'false',
