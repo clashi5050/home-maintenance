@@ -10,9 +10,27 @@ RUN apk add --no-cache tzdata \
  && mkdir -p /data \
  && chown node:node /data
 
+# Litestream continuously copies the database to Azure Blob Storage (used only in Azure; it does
+# nothing unless server/bootstrap.js is the start command). Pinned by version and checksum.
+ARG TARGETARCH
+ARG LITESTREAM_VERSION=0.5.17
+ARG LITESTREAM_SHA256_AMD64=cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d
+ARG LITESTREAM_SHA256_ARM64=f8ca4a050095c1efbda2c4365172e61bf9d955ea0d9ac42f448b52e51819baa5
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) arch=x86_64; sha="${LITESTREAM_SHA256_AMD64}" ;; \
+      arm64) arch=arm64; sha="${LITESTREAM_SHA256_ARM64}" ;; \
+      *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    wget -q -O /tmp/litestream.tgz "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-${arch}.tar.gz"; \
+    echo "${sha}  /tmp/litestream.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/litestream.tgz -C /usr/local/bin litestream; \
+    rm /tmp/litestream.tgz
+
 WORKDIR /app
 
-# The only runtime dependency is the Anthropic SDK, used by the optional assistant.
+# Runtime dependencies: the Anthropic SDK (optional assistant) and the Azure SDKs (used only when
+# STORAGE_BACKEND=azure-blob or the Azure start command is used).
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
