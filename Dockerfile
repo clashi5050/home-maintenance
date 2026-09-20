@@ -24,8 +24,11 @@ RUN set -eu; \
     esac; \
     wget -q -O /tmp/litestream.tgz "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-${arch}.tar.gz"; \
     echo "${sha}  /tmp/litestream.tgz" | sha256sum -c -; \
-    tar -xzf /tmp/litestream.tgz -C /usr/local/bin litestream; \
-    rm /tmp/litestream.tgz
+    mkdir /tmp/litestream; \
+    tar -xzf /tmp/litestream.tgz -C /tmp/litestream; \
+    install -m 0755 "$(find /tmp/litestream -type f -name litestream | head -n 1)" /usr/local/bin/litestream; \
+    litestream version; \
+    rm -rf /tmp/litestream /tmp/litestream.tgz
 
 WORKDIR /app
 
