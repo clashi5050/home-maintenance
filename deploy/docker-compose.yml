@@ -1,0 +1,28 @@
+# QNAP Container Station: Applications > Create > paste this (or upload the file).
+#
+# If you loaded the image from a tar file instead (see README),
+# use `image: home-maintenance:latest`.
+services:
+  home-maintenance:
+    image: ghcr.io/clashi5050/home-maintenance:latest
+    container_name: home-maintenance
+    restart: unless-stopped
+    ports:
+      # QTS itself uses 8080, so publish the app on 8085 instead.
+      - "8085:8080"
+    environment:
+      TZ: America/New_York
+      # Optional password for the whole app (browser login prompt). Recommended before
+      # you ever expose this outside your home network.
+      # BASIC_AUTH: "family:choose-a-long-password"
+
+      # Optional: turns on the Assistant (ask about a problem, with photos). Uses your own
+      # Anthropic account, billed per question. Leave it out to keep the app fully offline.
+      # ANTHROPIC_API_KEY: "sk-ant-..."
+      # ASSISTANT_MODEL: "claude-opus-5"       # the default; pick another model to lower the cost
+      # ASSISTANT_RATE_PER_HOUR: "20"          # cap on questions per hour
+    volumes:
+      - home-maintenance-data:/data
+
+volumes:
+  home-maintenance-data:

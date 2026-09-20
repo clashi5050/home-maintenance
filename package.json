@@ -1,0 +1,18 @@
+{
+  "name": "home-maintenance",
+  "version": "2.0.0",
+  "description": "Self-hosted home maintenance tracker: schedules, service log, documents, warranties, budget, push reminders and an optional AI assistant.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0"
+  }
+}

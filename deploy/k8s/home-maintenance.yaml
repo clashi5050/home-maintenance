@@ -1,0 +1,99 @@
+# Home Maintenance for K3s (Container Station > Kubernetes, or any cluster).
+# Upload in the Kubernetes Dashboard: Create > Create from file. Or: kubectl apply -f home-maintenance.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: home-maintenance
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: home-maintenance-data
+  namespace: home-maintenance
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+  # Uses the cluster's default StorageClass (local-path on K3s).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-maintenance
+  namespace: home-maintenance
+  labels:
+    app: home-maintenance
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # SQLite has a single writer, so never run two pods at once
+  selector:
+    matchLabels:
+      app: home-maintenance
+  template:
+    metadata:
+      labels:
+        app: home-maintenance
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: app
+          image: ghcr.io/clashi5050/home-maintenance:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: TZ
+              value: America/New_York
+            # Optional app-wide password. Uncomment and set your own.
+            # - name: BASIC_AUTH
+            #   value: "family:choose-a-long-password"
+            # Optional: turns on the Assistant. Create the secret first (see the README); the pod
+            # starts fine without it, and the Assistant simply stays off.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: home-maintenance-secrets
+                  key: anthropic-api-key
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: home-maintenance-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-maintenance
+  namespace: home-maintenance
+spec:
+  type: NodePort
+  selector:
+    app: home-maintenance
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30085 # open http://<NAS-IP>:30085

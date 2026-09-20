@@ -1,0 +1,9 @@
+.git
+.github
+data
+deploy
+test
+node_modules
+*.md
+Dockerfile
+.dockerignore

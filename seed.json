@@ -1,0 +1,26 @@
+{
+  "vendors": [
+    { "key": "shane", "name": "Shane Mizzelle", "notes": "Dryer vent cleaning" },
+    { "key": "shine", "name": "Shine of Richmond", "notes": "Window sill cleaning" },
+    { "key": "jaron", "name": "Jaron Heir Mechanical", "notes": "Water heater service" }
+  ],
+  "maintenance": [
+    { "name": "Fire extinguisher", "estimated_cost": 30 },
+    { "name": "Filters", "estimated_cost": 20 },
+    { "name": "HVAC maintenance", "service_month": 4, "estimated_cost": 230 },
+    { "name": "Power washing" },
+    { "name": "Dryer vent cleaning", "vendor": "shane" },
+    { "name": "Window sill cleaning", "vendor": "shine" },
+    { "name": "Deep clean" },
+    { "name": "Water heater service", "service_month": 4, "vendor": "jaron" }
+  ],
+  "tasks": [
+    { "kind": "need", "title": "Master bedroom mattress" },
+    { "kind": "need", "title": "Cushion for mudroom and light" },
+    { "kind": "project", "title": "Fence" },
+    { "kind": "project", "title": "Patio" },
+    { "kind": "project", "title": "Finish library" },
+    { "kind": "project", "title": "Pantry" },
+    { "kind": "project", "title": "Landscaping" }
+  ]
+}

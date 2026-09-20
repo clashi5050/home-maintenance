@@ -1,0 +1,4 @@
+# Keep line endings identical on Windows, the NAS and CI. Shell and Docker files must be LF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
