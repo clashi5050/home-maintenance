@@ -13,6 +13,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15 # the suite takes well under 2 minutes; a hang should fail fast, not run for hours
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.x (moving v4 tag, pinned)
@@ -25,6 +26,7 @@ jobs:
   image:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # multi-architecture build under emulation
     permissions:
       contents: read
       packages: write # push to GHCR (skipped on pull requests)
