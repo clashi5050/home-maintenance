@@ -56,6 +56,13 @@ skip-check:
   # SAS expiration policy has nothing to govern.
   - CKV2_AZURE_41   # storage: SAS expiration policy
 
+  # --- Blob read logging: a false alarm, verified in CI ----------------------------------------------
+  # infra/stacks/foundation/storage.tf enables StorageRead, StorageWrite and StorageDelete logs on the
+  # blob service through azurerm_monitor_diagnostic_setting.blob (enabled_log blocks, the current syntax).
+  # This rule still looks for the deprecated `log` block, so it reports every container as failing.
+  # Keep this skip only while that is true; the first CI run reported exactly this and nothing else.
+  - CKV2_AZURE_21   # storage: logging for Blob read requests
+
   # --- Subnet NSGs ---------------------------------------------------------------------------
   # The Container Apps subnet must accept the platform's own traffic and public HTTPS from the internet
   # for the login-protected web app, so an NSG there would only restate the platform defaults (and a

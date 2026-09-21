@@ -1,0 +1,55 @@
+name: 'Litestream integration'
+
+# Runs the real Litestream binary (the exact version and checksum the Dockerfile pins) against the Azurite
+# Blob emulator on Linux, the only platform Litestream supports. It proves the backup, restore, crash and
+# shutdown behaviour that server/bootstrap.js depends on. The unit tests use a stand-in Litestream; this is
+# the check against the real thing.
+on:
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'test/**'
+      - 'Dockerfile'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/litestream-integration.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - 'test/**'
+      - 'Dockerfile'
+      - '.github/workflows/litestream-integration.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  real-litestream:
+    name: 'Real Litestream on Linux'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Keep these two in step with the ARGs in the Dockerfile.
+      LITESTREAM_VERSION: '0.5.17'
+      LITESTREAM_SHA256: 'cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.x (moving v4 tag, pinned)
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - name: Install Litestream (pinned, checksum verified)
+        run: |
+          curl -fsSL -o /tmp/litestream.tgz "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-x86_64.tar.gz"
+          echo "${LITESTREAM_SHA256}  /tmp/litestream.tgz" | sha256sum -c -
+          mkdir /tmp/ls
+          tar -xzf /tmp/litestream.tgz -C /tmp/ls
+          bin="$(find /tmp/ls -type f -name litestream | head -n 1)"
+          "${bin}" version
+          echo "LITESTREAM_BIN=${bin}" >> "$GITHUB_ENV"
+
+      - name: Run the integration test
+        run: node --disable-warning=ExperimentalWarning --test test/litestream.integration.test.js
