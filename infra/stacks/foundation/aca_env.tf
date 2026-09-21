@@ -33,9 +33,11 @@ resource "azurerm_container_app_environment" "main" {
   # Deterministic name so the budget can include the platform-managed group's cost.
   infrastructure_resource_group_name = module.naming.resource_group_aca_infra
 
-  internal_load_balancer_enabled = false
+  # The provider accepts these two only together with infrastructure_subnet_id. Without a
+  # VNet the environment is public and not zone redundant anyway, so they are left unset.
+  internal_load_balancer_enabled = var.private_networking ? false : null
+  zone_redundancy_enabled        = var.private_networking ? false : null
   public_network_access          = "Enabled"
-  zone_redundancy_enabled        = false
   mutual_tls_enabled             = false
 
   workload_profile {
