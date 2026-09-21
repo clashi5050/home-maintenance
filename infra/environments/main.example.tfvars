@@ -31,7 +31,7 @@ location    = "region-name"
 
 # --- Foundation stack ------------------------------------------------------------
 # enable_locks   = true       # default
-# monthly_budget = 25         # default
+# monthly_budget = 75         # default
 alert_emails = ["alerts@example.invalid"]
 
 # --- App stack ---------------------------------------------------------------------

@@ -31,12 +31,14 @@ The environment also makes a platform-managed group `rg-<...>-acainfra`; do not 
 ## Cost: read before applying
 
 `private_networking = true` (the default) creates private endpoints for blob and Key Vault (and Foundry when
-enabled). Private endpoints are billed per hour (about USD 0.01/h each, roughly USD 7 a month each; **pricing
-not verified here**), plus four private DNS zones, plus the Container App (0.5 vCPU / 1 GiB, always on, idle
-rate when quiet), Log Analytics (capped at 0.5 GB/day) and storage. That can consume most of the default USD 25
-budget. A VNet-integrated environment may also bill a load balancer and public IP in the `acainfra` group
-(**unverified**). `AZ_PRIVATE_NETWORKING=false` removes the VNet and private endpoints (data services then accept
-public connections, still Entra-only).
+enabled). From Azure's retail price list (eastus2): a private endpoint is USD 0.01/hour, about USD 7.30 a month
+each, and a private DNS zone is USD 0.50 a month (four zones). A VNet-integrated Container Apps environment also
+bills managed resources in the `acainfra` group (a static egress IP, a static ingress IP and a load balancer;
+roughly USD 25 a month, an **estimate** from the retail meters, to be confirmed on the first real bill). Add the
+Container App itself (0.5 vCPU / 1 GiB, always on, idle rate when quiet, about USD 10 to 12), Log Analytics
+(capped at 0.5 GB/day) and storage. Expect roughly **USD 65 to 70 a month** with everything private, which is why
+`AZ_MONTHLY_BUDGET` defaults to 75. `AZ_PRIVATE_NETWORKING=false` removes the VNet and private endpoints (data
+services then accept public connections, still Entra-only) and brings the total to roughly USD 14 to 18.
 
 Never add to the Container Apps environment: a private endpoint on the environment itself, a Dedicated
 workload profile, or planned maintenance. Each starts a Dedicated Plan management fee (about USD 73 a month).
@@ -76,10 +78,13 @@ audience `api://AzureADTokenExchange`):
 | destroy-app.yml, destroy-all.yml | `repo:<owner>/<repo>:environment:azure-destroy` |
 | terraform-pr.yml (plan) | `repo:<owner>/<repo>:pull_request` |
 
-**Recommendation:** put the `pull_request` subject on a *separate, read-only* app registration (Reader on the
-subscription, plus the same state access) and set its client id as the variable `ARM_PLAN_CLIENT_ID`. Anyone
-who can push a branch to this repo can change the PR workflow, and whatever identity holds the
-`pull_request` subject runs their code. If you skip this, the PR plan uses the deploy identity.
+**Required for pull-request plans:** put the `pull_request` subject on a *separate, read-only* app registration
+(Reader on the subscription, plus the same state access) and set its client id as the variable
+`ARM_PLAN_CLIENT_ID`. Anyone who can push a branch to this repo can change the PR workflow, and whatever
+identity holds the `pull_request` subject runs their code, so that subject must never belong to the deploy
+identity. Without `ARM_PLAN_CLIENT_ID` the PR plan job is skipped (formatting, validation and the security scans
+still run, and the approver of `terraform-apply.yml` still sees the plan counts before anything is applied).
+Never add the `pull_request` subject to the deploy identity.
 
 ### 2. GitHub
 
@@ -96,9 +101,9 @@ Repository **variables**:
 | `ARM_CLIENT_ID`, `ARM_TENANT_ID`, `ARM_SUBSCRIPTION_ID` | required |
 | `AZ_COMPANY_LOC`, `AZ_SHORT_LOC`, `AZ_LOCATION` | required (naming and region; the region must support GZRS, Container Apps workload profiles and, for Claude, the model) |
 | `GOOGLE_CLIENT_ID` | required (not a secret) |
-| `ARM_PLAN_CLIENT_ID` | optional, see above |
+| `ARM_PLAN_CLIENT_ID` | read-only identity for PR plans; without it the PR plan is skipped (see above) |
 | `AZ_APP` (default `homemaint`), `AZ_ENVIRONMENT` (default `main`) | optional |
-| `AZ_PRIVATE_NETWORKING` (default `true`), `AZ_MONTHLY_BUDGET` (default `25`) | optional |
+| `AZ_PRIVATE_NETWORKING` (default `true`), `AZ_MONTHLY_BUDGET` (default `75`) | optional |
 | `GOOGLE_SECRET_SOURCE` (`keyvault` default, or `inline`) | optional |
 | `ENABLE_CLAUDE` (default `false`), `CLAUDE_ORGANIZATION_NAME`, `CLAUDE_COUNTRY_CODE`, `CLAUDE_INDUSTRY`, `CLAUDE_MODEL_NAME`, `CLAUDE_MODEL_VERSION` | optional; see "Claude" |
 
@@ -210,10 +215,11 @@ User, so the code change is to obtain an Entra token and use the `foundry_endpoi
   **1.16.3**; a state file written by a newer Terraform cannot be read by an older one, so a local 1.5.x can no
   longer use this remote state once CI has applied. Local checks that need no state still work:
   `terraform init -backend=false && terraform validate` in each stack.
-* The provider lock file is git-ignored: one written on Windows only has Windows hashes and would break
-  `init` on the Linux runners. To commit one, generate it for every platform
-  (`terraform providers lock -platform=linux_amd64 -platform=windows_amd64 -platform=darwin_arm64` in each
-  stack), then remove `.terraform.lock.hcl` from `.gitignore`.
+* The provider lock files (`.terraform.lock.hcl` in each stack) are committed. They pin the exact provider
+  builds by hash, which protects against a tampered provider. They were written on Windows: they carry that
+  platform's `h1:` hash plus the registry's `zh:` checksums for every platform, which is what the Linux
+  runners verify against. Dependabot proposes provider upgrades as pull requests; after merging one, run
+  `terraform init -upgrade` in the stack and commit the updated lock file.
 * Storage account and Key Vault names are globally unique. If a name is taken, `apply` fails; change
   `AZ_COMPANY_LOC` or `AZ_APP`.
 

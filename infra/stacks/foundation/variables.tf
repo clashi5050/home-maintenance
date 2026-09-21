@@ -87,9 +87,9 @@ variable "enable_locks" {
 }
 
 variable "monthly_budget" {
-  description = "Monthly budget in the billing currency for everything tagged to this app (foundation, app and platform-managed resource groups)."
+  description = "Monthly budget in the billing currency for the three resource groups this project owns (foundation, app and the platform-managed Container Apps group). Alerts at 50%, 80% and 100% (forecast and actual)."
   type        = number
-  default     = 25
+  default     = 75
 }
 
 variable "alert_emails" {

@@ -101,9 +101,14 @@ jobs:
     needs: validate
     # Same-repo PRs only. Fork PRs get no secrets and no OIDC token. Dependabot PRs get neither
     # (Dependabot has its own secret store), so plan is skipped for them too.
+    # ALSO requires ARM_PLAN_CLIENT_ID: a separate READ-ONLY identity. Any workflow file in a same-repo
+    # PR branch can obtain a token for the `pull_request` subject, so that subject must never map to
+    # the deploy identity (which can create and destroy resources). Without the variable this job is
+    # skipped, and the plan is still shown (as counts) in the approval step of terraform-apply.yml.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor != 'dependabot[bot]'
+      github.actor != 'dependabot[bot]' &&
+      vars.ARM_PLAN_CLIENT_ID != ''
     runs-on: ubuntu-latest
     # The app stack reads the foundation stack's resources, so its plan cannot succeed until the
     # foundation stack has been applied once. That is expected and must not block the PR.
@@ -123,13 +128,12 @@ jobs:
         working-directory: infra/stacks/${{ matrix.stack }}
     env:
       ARM_USE_OIDC: 'true'
-      # A separate read-only identity is strongly recommended for pull requests (see infra/README.md).
-      # ARM_PLAN_CLIENT_ID is optional and falls back to the deploy identity.
-      ARM_CLIENT_ID: ${{ vars.ARM_PLAN_CLIENT_ID || vars.ARM_CLIENT_ID }}
+      # The read-only plan identity (see infra/README.md). Never the deploy identity.
+      ARM_CLIENT_ID: ${{ vars.ARM_PLAN_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
       TFSTATE_SUBSCRIPTION_ID: ${{ secrets.TFSTATE_SUBSCRIPTION_ID }}
-      TF_VAR_arm_client_id: ${{ vars.ARM_PLAN_CLIENT_ID || vars.ARM_CLIENT_ID }}
+      TF_VAR_arm_client_id: ${{ vars.ARM_PLAN_CLIENT_ID }}
       TF_VAR_arm_tenant_id: ${{ vars.ARM_TENANT_ID }}
       TF_VAR_arm_subscription_id: ${{ vars.ARM_SUBSCRIPTION_ID }}
       TF_VAR_company_loc: ${{ vars.AZ_COMPANY_LOC }}
@@ -138,12 +142,12 @@ jobs:
       TF_VAR_app: ${{ vars.AZ_APP || 'homemaint' }}
       TF_VAR_environment: ${{ vars.AZ_ENVIRONMENT || 'main' }}
       TF_VAR_private_networking: ${{ vars.AZ_PRIVATE_NETWORKING || 'true' }}
-      TF_VAR_monthly_budget: ${{ vars.AZ_MONTHLY_BUDGET || '25' }}
+      TF_VAR_monthly_budget: ${{ vars.AZ_MONTHLY_BUDGET || '75' }}
       TF_VAR_alert_emails: ${{ secrets.ALERT_EMAILS }}
       TF_VAR_allowed_emails: ${{ secrets.ALLOWED_EMAILS }}
       TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+      # The Google client secret is deliberately NOT given to pull request jobs.
       TF_VAR_google_secret_source: ${{ vars.GOOGLE_SECRET_SOURCE || 'keyvault' }}
-      TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       TF_VAR_enable_claude: ${{ vars.ENABLE_CLAUDE || 'false' }}
       TF_VAR_claude_organization_name: ${{ vars.CLAUDE_ORGANIZATION_NAME }}
       TF_VAR_claude_country_code: ${{ vars.CLAUDE_COUNTRY_CODE }}

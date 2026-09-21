@@ -19,7 +19,3 @@ override.tf.json
 *.auto.tfvars
 *.tfvars.json
 !*.example.tfvars
-# The lock file is not committed because a file written on Windows would only carry Windows
-# hashes and break `terraform init` on the Linux runners. See infra/README.md to commit a
-# multi-platform one, and then remove this line.
-.terraform.lock.hcl
