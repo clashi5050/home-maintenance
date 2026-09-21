@@ -157,6 +157,8 @@ jobs:
     steps:
       # These ids are GitHub variables (not secrets), so the runner does not mask them by itself.
       - name: Mask identifiers in logs
+        # Runs before checkout, so the job's default working directory does not exist yet.
+        working-directory: ${{ github.workspace }}
         run: |
           echo "::add-mask::${ARM_SUBSCRIPTION_ID}"
           echo "::add-mask::${ARM_TENANT_ID}"

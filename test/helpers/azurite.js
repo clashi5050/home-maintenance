@@ -28,12 +28,15 @@ export async function startAzurite() {
   for (let i = 0; i < 600; i++) {
     try { await fetch(`${endpoint}?comp=list`); break; } catch { /* not listening yet */ }
     await new Promise((r) => setTimeout(r, 100));
-    if (i === 599) { child.kill(); throw new Error('Azurite did not start within 60 seconds'); }
+    if (i === 599) { child.kill('SIGKILL'); throw new Error('Azurite did not start within 60 seconds'); }
   }
   return {
     endpoint,
     port,
     connectionString: `DefaultEndpointsProtocol=http;AccountName=${EMULATOR_ACCOUNT};AccountKey=${EMULATOR_KEY};BlobEndpoint=${endpoint};`,
-    stop: () => { child.kill(); fs.rmSync(dir, { recursive: true, force: true }); },
+    // SIGKILL, not the polite SIGTERM: on Linux Azurite then shuts down gracefully and waits for the
+    // test's still-open keep-alive connections, while the test waits for Azurite to exit, so both wait
+    // forever. (On Windows kill() is already forceful.) The emulator's data is throwaway.
+    stop: () => { child.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); },
   };
 }

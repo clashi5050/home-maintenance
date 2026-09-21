@@ -26,23 +26,37 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
 
+  # The azurerm provider is deliberately held on 4.x (matching the showcase site). A new major version
+  # is a planned upgrade of both stacks together, not something to merge from a bot pull request; minor
+  # and patch updates still arrive.
   - package-ecosystem: terraform
     directory: /infra/stacks/foundation
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: hashicorp/azurerm
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: terraform
     directory: /infra/stacks/app
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: hashicorp/azurerm
+        update-types: ['version-update:semver-major']
 
+  # Node stays on the current LTS line (24). A new major is a planned move, not a bot pull request
+  # (an odd-numbered release such as 25 is never LTS).
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: node
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: pip
     directory: /.github/ci

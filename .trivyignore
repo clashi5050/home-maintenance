@@ -6,8 +6,8 @@
 #   - the "trivy config" step in .github/workflows/terraform-pr.yml (misconfigurations, ids like AVD-AZU-0012)
 # Both scans fail on HIGH and CRITICAL findings (the image scan only on findings that have a fix).
 #
-# THIS FILE IS EMPTY ON PURPOSE. Add a line only when a finding is truly not actionable, and every line
-# needs (1) a comment above it saying why, and (2) an expiry so it cannot be forgotten:
+# Add a line only when a finding is truly not actionable, and every line needs (1) a comment above it
+# saying why, and (2) an expiry so it cannot be forgotten:
 #
 #   # openssl CVE affects only the DTLS path, which this app does not use. Revisit when the
 #   # base image updates.
@@ -16,3 +16,17 @@
 # Prefer fixing the cause: rebuild to pick up a newer base image, bump the dependency, or change the
 # Terraform. Never lower the scan severity to make a finding go away.
 # =============================================================================
+
+# --- Litestream 0.5.17 (usr/local/bin/litestream) -------------------------------------------------
+# Found by the first image scan. These are Go libraries compiled into the official Litestream binary,
+# which is pinned by checksum in the Dockerfile. 0.5.17 is the latest release (checked 2026-09-21), so
+# there is no fixed binary to move to. This deployment uses only Litestream's Azure Blob replica: it
+# never uses the SFTP replica (golang.org/x/crypto/ssh) and never runs or connects to a gRPC service
+# (google.golang.org/grpc), so those code paths are not used here. Reachability of the golang.org/x/net
+# finding was NOT analysed; it is waived on the same basis (no fixed binary exists) and is the first
+# one to check. Revisit at the expiry, or as soon as Litestream publishes a release with updated modules
+# (then bump LITESTREAM_VERSION and both checksums in the Dockerfile and litestream-integration.yml).
+CVE-2026-56854 exp:2026-10-31
+CVE-2026-46600 exp:2026-10-31
+CVE-2026-84304 exp:2026-10-31
+CVE-2026-84445 exp:2026-10-31
