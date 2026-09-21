@@ -1,3 +1,25 @@
 data/
 node_modules/
 *.log
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+plan.txt
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+# Variable values never go in git (this repo is public). They arrive as TF_VAR_* from
+# GitHub variables/secrets. Only *.example.tfvars (placeholders) may be committed.
+*.tfvars
+*.auto.tfvars
+*.tfvars.json
+!*.example.tfvars
+# The lock file is not committed because a file written on Windows would only carry Windows
+# hashes and break `terraform init` on the Linux runners. See infra/README.md to commit a
+# multi-platform one, and then remove this line.
+.terraform.lock.hcl
