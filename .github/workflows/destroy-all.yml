@@ -1,0 +1,214 @@
+# Workflow name shown in the GitHub Actions UI
+name: 'Destroy everything (app, then foundation)'
+
+# DESTRUCTIVE AND NOT REVERSIBLE. Destroys the app stack and then the foundation stack: the storage
+# account (all uploaded documents and the database replica), the Key Vault, the network, the Container
+# Apps environment and the budget. Soft delete keeps deleted blobs for a while but this workflow does not
+# rely on it, and a destroyed Key Vault stays soft-deleted (purge protection) for 90 days.
+#
+# The CanNotDelete locks on the storage account and Key Vault are Terraform resources that depend on the
+# things they protect, so Terraform removes them first and the destroy is not blocked by them.
+#
+# Guard rails, all required: manual only, `confirm` must be exactly `destroy-everything`,
+# `i_have_a_final_export` must be ticked, and both destroy jobs run in the `azure-destroy` GitHub
+# environment (required reviewers = approval gate; two approvals: app, then foundation).
+# If you only want to stop the costs, use "Destroy app (emergency cost stop)" instead.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type destroy-everything to confirm'
+        required: true
+        default: ''
+      i_have_a_final_export:
+        description: 'I have exported my documents and the database (see infra/README.md, Data export). This deletes them.'
+        type: boolean
+        required: true
+        default: false
+
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: '1.16.3'
+  TF_IN_AUTOMATION: 'true'
+  ARM_USE_OIDC: 'true'
+  ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+  TFSTATE_SUBSCRIPTION_ID: ${{ secrets.TFSTATE_SUBSCRIPTION_ID }}
+  TF_VAR_arm_client_id: ${{ vars.ARM_CLIENT_ID }}
+  TF_VAR_arm_tenant_id: ${{ vars.ARM_TENANT_ID }}
+  TF_VAR_arm_subscription_id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+  TF_VAR_company_loc: ${{ vars.AZ_COMPANY_LOC }}
+  TF_VAR_short_loc: ${{ vars.AZ_SHORT_LOC }}
+  TF_VAR_location: ${{ vars.AZ_LOCATION }}
+  TF_VAR_app: ${{ vars.AZ_APP || 'homemaint' }}
+  TF_VAR_environment: ${{ vars.AZ_ENVIRONMENT || 'main' }}
+  TF_VAR_private_networking: ${{ vars.AZ_PRIVATE_NETWORKING || 'true' }}
+  TF_VAR_monthly_budget: ${{ vars.AZ_MONTHLY_BUDGET || '25' }}
+  TF_VAR_alert_emails: ${{ secrets.ALERT_EMAILS }}
+  TF_VAR_allowed_emails: ${{ secrets.ALLOWED_EMAILS }}
+  TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+  TF_VAR_google_secret_source: ${{ vars.GOOGLE_SECRET_SOURCE || 'keyvault' }}
+  TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+  TF_VAR_enable_claude: ${{ vars.ENABLE_CLAUDE || 'false' }}
+  TF_VAR_claude_organization_name: ${{ vars.CLAUDE_ORGANIZATION_NAME }}
+  TF_VAR_claude_country_code: ${{ vars.CLAUDE_COUNTRY_CODE }}
+  TF_VAR_claude_industry: ${{ vars.CLAUDE_INDUSTRY }}
+  # Terraform still evaluates the configuration when destroying, and `image` is a required variable.
+  # Any well-formed digest will do: the value is not used to remove anything.
+  TF_VAR_image: 'ghcr.io/placeholder/home-maintenance@sha256:0000000000000000000000000000000000000000000000000000000000000000'
+
+jobs:
+  check:
+    name: 'Check confirmations'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      # Inputs go through environment variables, never straight into the script text.
+      - name: Check confirmations and branch
+        env:
+          CONFIRM: ${{ github.event.inputs.confirm }}
+          EXPORTED: ${{ github.event.inputs.i_have_a_final_export }}
+        run: |
+          failed=0
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Run this workflow from the main branch (it was started on ${GITHUB_REF})."
+            failed=1
+          fi
+          if [ "${CONFIRM}" != "destroy-everything" ]; then
+            echo "::error::The confirm input did not match. Type exactly: destroy-everything"
+            failed=1
+          fi
+          if [ "${EXPORTED}" != "true" ]; then
+            echo "::error::i_have_a_final_export is not ticked. This workflow permanently deletes your documents and database. Export them first (infra/README.md, Data export), then tick the box."
+            failed=1
+          fi
+          if [ "${failed}" -ne 0 ]; then
+            echo "::error::Nothing was destroyed."
+            exit 1
+          fi
+          echo "Confirmed. The app stack, then the foundation stack, will be destroyed after approval."
+
+  destroy-app:
+    name: 'Destroy app stack'
+    needs: check
+    runs-on: ubuntu-latest
+    environment: azure-destroy
+    permissions:
+      contents: read
+      id-token: write   # OIDC token for azure/login and the azurerm provider
+    defaults:
+      run:
+        working-directory: infra/stacks/app
+    steps:
+      - name: Mask identifiers in logs
+        run: |
+          echo "::add-mask::${ARM_SUBSCRIPTION_ID}"
+          echo "::add-mask::${ARM_TENANT_ID}"
+          echo "::add-mask::${ARM_CLIENT_ID}"
+          echo "::add-mask::${TFSTATE_SUBSCRIPTION_ID}"
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Login to Azure with OIDC federated credentials
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config=backend.hcl \
+            -backend-config="key=${TF_VAR_environment}-${TF_VAR_short_loc}-${TF_VAR_app}-app.tfstate" \
+            -backend-config="subscription_id=${TFSTATE_SUBSCRIPTION_ID}"
+
+      - name: Terraform plan (destroy)
+        run: |
+          set +e
+          terraform plan -destroy -input=false -no-color -lock-timeout=10m -out=tfplan > plan.raw 2>&1
+          status=$?
+          if [ "${status}" -ne 0 ]; then
+            echo "::error::terraform plan -destroy failed. Error output, with identifiers replaced:"
+            bash "$GITHUB_WORKSPACE/.github/scripts/redact-ids.sh" < plan.raw | tail -n 60
+            exit 1
+          fi
+          rm -f plan.raw
+          bash "$GITHUB_WORKSPACE/.github/scripts/plan-summary.sh" "Destroy app stack" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform destroy (saved plan)
+        run: terraform apply -input=false -no-color -lock-timeout=10m tfplan
+
+  destroy-foundation:
+    name: 'Destroy foundation stack'
+    needs: destroy-app
+    runs-on: ubuntu-latest
+    environment: azure-destroy
+    permissions:
+      contents: read
+      id-token: write   # OIDC token for azure/login and the azurerm provider
+    defaults:
+      run:
+        working-directory: infra/stacks/foundation
+    steps:
+      - name: Mask identifiers in logs
+        run: |
+          echo "::add-mask::${ARM_SUBSCRIPTION_ID}"
+          echo "::add-mask::${ARM_TENANT_ID}"
+          echo "::add-mask::${ARM_CLIENT_ID}"
+          echo "::add-mask::${TFSTATE_SUBSCRIPTION_ID}"
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Login to Azure with OIDC federated credentials
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config=backend.hcl \
+            -backend-config="key=${TF_VAR_environment}-${TF_VAR_short_loc}-${TF_VAR_app}-foundation.tfstate" \
+            -backend-config="subscription_id=${TFSTATE_SUBSCRIPTION_ID}"
+
+      # The locks are resources in this state that depend on the things they protect (and on those
+      # things' children), so Terraform removes them before anything they would block.
+      - name: Terraform plan (destroy)
+        run: |
+          set +e
+          terraform plan -destroy -input=false -no-color -lock-timeout=10m -out=tfplan > plan.raw 2>&1
+          status=$?
+          if [ "${status}" -ne 0 ]; then
+            echo "::error::terraform plan -destroy failed. Error output, with identifiers replaced:"
+            bash "$GITHUB_WORKSPACE/.github/scripts/redact-ids.sh" < plan.raw | tail -n 60
+            exit 1
+          fi
+          rm -f plan.raw
+          bash "$GITHUB_WORKSPACE/.github/scripts/plan-summary.sh" "Destroy foundation stack" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform destroy (saved plan)
+        run: terraform apply -input=false -no-color -lock-timeout=10m tfplan

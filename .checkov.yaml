@@ -1,0 +1,64 @@
+# =============================================================================
+# .checkov.yaml
+# -----------------------------------------------------------------------------
+# Configuration for `checkov --directory infra --config-file .checkov.yaml`
+# (terraform-pr.yml). The scan is NOT soft-fail: any finding that is not listed
+# below fails the pull request.
+#
+# RULE FOR THIS FILE: every skipped check has a written reason directly above it.
+# A skip without a reason is a bug; remove it or add the reason.
+#
+# STATUS: this list was written without being able to run checkov (it was not
+# installed where the infrastructure was authored). The check ids and their names
+# are from memory of checkov's Azure policies. Expect to adjust it after the first
+# CI run: delete skips that turn out to be unnecessary, and add a justified skip
+# (or fix the code) for anything new that fails. Do not paste in a skip you have
+# not read the reason for.
+# =============================================================================
+framework:
+  - terraform
+directory:
+  - infra
+compact: true
+quiet: true
+soft-fail: false
+
+skip-check:
+  # --- Network exposure controlled by var.private_networking -----------------------------------
+  # private_networking defaults to true, which gives: storage and Key Vault with public network
+  # access disabled and default-deny firewalls, private endpoints for both, and a Foundry account with
+  # a default-deny ACL. Checkov cannot evaluate the `!var.private_networking` / conditional expressions
+  # or the `count = var.private_networking ? 1 : 0` private endpoints, so it reports the public
+  # fallback (private_networking = false, opt-in, still Entra-only authentication) as if it were the
+  # default. These skips cover that and nothing else.
+  - CKV_AZURE_35    # storage: default network access rule should be Deny (conditional on private_networking)
+  - CKV_AZURE_59    # storage: public network access should be disabled (conditional on private_networking)
+  - CKV2_AZURE_33   # storage: should have a private endpoint (count-conditional on private_networking)
+  - CKV_AZURE_189   # key vault: public network access should be disabled (conditional on private_networking)
+  - CKV_AZURE_109   # key vault: firewall default action should be Deny (conditional on private_networking)
+  - CKV2_AZURE_32   # key vault: should use a private endpoint (count-conditional on private_networking)
+  - CKV_AZURE_134   # cognitive account: public network access should be disabled (conditional on private_networking)
+
+  # --- Customer-managed keys ------------------------------------------------------------------
+  # Data is encrypted at rest with platform-managed keys, doubled with infrastructure encryption
+  # (infrastructure_encryption_enabled = true) on the storage account. Customer-managed keys would need
+  # a key in Key Vault, a rotation process and an extra identity for a single-household app; the added
+  # risk of locking yourself out of your own data outweighs the benefit here.
+  - CKV2_AZURE_1    # storage: should be encrypted with a customer-managed key
+  - CKV2_AZURE_22   # cognitive account: should be encrypted with a customer-managed key
+
+  # --- Storage features that do not apply --------------------------------------------------------
+  # The account has no queue service in use and Terraform only uses the control plane
+  # (provider feature storage.data_plane_available = false), so queue_properties, which are data plane
+  # settings, cannot be managed here.
+  - CKV_AZURE_33    # storage: queue service logging
+  # Shared keys and therefore account SAS tokens are disabled (shared_access_key_enabled = false), so a
+  # SAS expiration policy has nothing to govern.
+  - CKV2_AZURE_41   # storage: SAS expiration policy
+
+  # --- Subnet NSGs ---------------------------------------------------------------------------
+  # The Container Apps subnet must accept the platform's own traffic and public HTTPS from the internet
+  # for the login-protected web app, so an NSG there would only restate the platform defaults (and a
+  # wrong rule breaks the environment). The private endpoint subnet holds only private endpoints and is
+  # reachable only from inside the VNet. No custom rules are needed for either.
+  - CKV2_AZURE_31   # VNet subnet should have a network security group

@@ -1,0 +1,255 @@
+# Workflow name shown in the GitHub Actions UI
+name: 'Terraform PR checks'
+
+# Runs on every pull request that touches the infrastructure code or the workflows that deploy it.
+#   validate  fmt + init (no backend) + validate, both stacks. Needs no credentials.
+#   security  checkov and trivy config scans over infra/.
+#   plan      `terraform plan` for both stacks, ONLY when the PR comes from this same repository
+#             (a fork's PR gets no secrets and no Azure token). Read-only: nothing is applied.
+# The plan is uploaded as a redacted text artifact. It is never posted as a PR comment and never
+# printed to the log, because the log of a public repository is public.
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+      - '.checkov.yaml'
+      - '.trivyignore'
+      - '.github/ci/**'
+      - '.github/scripts/**'
+      - '.github/workflows/terraform-pr.yml'
+      - '.github/workflows/terraform-apply.yml'
+      - '.github/workflows/destroy-app.yml'
+      - '.github/workflows/destroy-all.yml'
+
+concurrency:
+  group: terraform-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Nothing in this workflow needs to write to the repository.
+permissions:
+  contents: read
+
+env:
+  # Current stable Terraform. The developer's local Terraform (1.5.x) is older; see infra/README.md.
+  TF_VERSION: '1.16.3'
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  validate:
+    name: 'Validate (${{ matrix.stack }})'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [foundation, app]
+    defaults:
+      run:
+        working-directory: infra/stacks/${{ matrix.stack }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # -recursive also formats infra/modules, which both stacks use.
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive -diff ../..
+
+      - name: Terraform init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+  security:
+    name: 'Security scan (checkov, trivy)'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # Version-pinned in a requirements file so Dependabot (pip) can propose upgrades.
+      - name: Install checkov
+        run: pip install -r .github/ci/requirements.txt
+
+      # Not soft-fail: any finding fails the PR. Every skip is justified in .checkov.yaml.
+      - name: checkov
+        run: checkov --directory infra --config-file .checkov.yaml
+
+      # HIGH and CRITICAL misconfigurations fail the job. Exceptions go in .trivyignore with a reason.
+      - name: trivy config
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: infra
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          trivyignores: .trivyignore
+          hide-progress: true
+
+  plan:
+    name: 'Plan (${{ matrix.stack }})'
+    needs: validate
+    # Same-repo PRs only. Fork PRs get no secrets and no OIDC token. Dependabot PRs get neither
+    # (Dependabot has its own secret store), so plan is skipped for them too.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    # The app stack reads the foundation stack's resources, so its plan cannot succeed until the
+    # foundation stack has been applied once. That is expected and must not block the PR.
+    continue-on-error: ${{ matrix.stack == 'app' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [foundation, app]
+    # No `environment:` on purpose: the federated credential subject for this job is
+    # repo:<owner>/<repo>:pull_request, so there is no approval prompt.
+    permissions:
+      contents: read
+      id-token: write   # OIDC token for azure/login and the azurerm provider
+      packages: read    # read the image digest from GHCR (app stack only)
+    defaults:
+      run:
+        working-directory: infra/stacks/${{ matrix.stack }}
+    env:
+      ARM_USE_OIDC: 'true'
+      # A separate read-only identity is strongly recommended for pull requests (see infra/README.md).
+      # ARM_PLAN_CLIENT_ID is optional and falls back to the deploy identity.
+      ARM_CLIENT_ID: ${{ vars.ARM_PLAN_CLIENT_ID || vars.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+      TFSTATE_SUBSCRIPTION_ID: ${{ secrets.TFSTATE_SUBSCRIPTION_ID }}
+      TF_VAR_arm_client_id: ${{ vars.ARM_PLAN_CLIENT_ID || vars.ARM_CLIENT_ID }}
+      TF_VAR_arm_tenant_id: ${{ vars.ARM_TENANT_ID }}
+      TF_VAR_arm_subscription_id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+      TF_VAR_company_loc: ${{ vars.AZ_COMPANY_LOC }}
+      TF_VAR_short_loc: ${{ vars.AZ_SHORT_LOC }}
+      TF_VAR_location: ${{ vars.AZ_LOCATION }}
+      TF_VAR_app: ${{ vars.AZ_APP || 'homemaint' }}
+      TF_VAR_environment: ${{ vars.AZ_ENVIRONMENT || 'main' }}
+      TF_VAR_private_networking: ${{ vars.AZ_PRIVATE_NETWORKING || 'true' }}
+      TF_VAR_monthly_budget: ${{ vars.AZ_MONTHLY_BUDGET || '25' }}
+      TF_VAR_alert_emails: ${{ secrets.ALERT_EMAILS }}
+      TF_VAR_allowed_emails: ${{ secrets.ALLOWED_EMAILS }}
+      TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+      TF_VAR_google_secret_source: ${{ vars.GOOGLE_SECRET_SOURCE || 'keyvault' }}
+      TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      TF_VAR_enable_claude: ${{ vars.ENABLE_CLAUDE || 'false' }}
+      TF_VAR_claude_organization_name: ${{ vars.CLAUDE_ORGANIZATION_NAME }}
+      TF_VAR_claude_country_code: ${{ vars.CLAUDE_COUNTRY_CODE }}
+      TF_VAR_claude_industry: ${{ vars.CLAUDE_INDUSTRY }}
+      TF_VAR_claude_model_name: ${{ vars.CLAUDE_MODEL_NAME || 'claude-opus-5' }}
+      TF_VAR_claude_model_version: ${{ vars.CLAUDE_MODEL_VERSION || '1' }}
+    steps:
+      # These ids are GitHub variables (not secrets), so the runner does not mask them by itself.
+      - name: Mask identifiers in logs
+        run: |
+          echo "::add-mask::${ARM_SUBSCRIPTION_ID}"
+          echo "::add-mask::${ARM_TENANT_ID}"
+          echo "::add-mask::${ARM_CLIENT_ID}"
+          echo "::add-mask::${TFSTATE_SUBSCRIPTION_ID}"
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Login to Azure with OIDC federated credentials
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config=backend.hcl \
+            -backend-config="key=${TF_VAR_environment}-${TF_VAR_short_loc}-${TF_VAR_app}-${{ matrix.stack }}.tfstate" \
+            -backend-config="subscription_id=${TFSTATE_SUBSCRIPTION_ID}"
+
+      # The app stack needs an image digest. Use the one currently published as :latest so the plan
+      # shows only real infrastructure changes, not an image change.
+      - name: Log in to GHCR
+        if: matrix.stack == 'app'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image digest (app only)
+        if: matrix.stack == 'app'
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          digest="$(docker buildx imagetools inspect "ghcr.io/${owner}/home-maintenance:latest" --format '{{.Manifest.Digest}}' || true)"
+          if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::warning::Could not read the digest of ghcr.io/${owner}/home-maintenance:latest; planning with a placeholder image."
+            digest="sha256:$(printf '0%.0s' {1..64})"
+          fi
+          echo "TF_VAR_image=ghcr.io/${owner}/home-maintenance@${digest}" >> "$GITHUB_ENV"
+
+      # Nothing is printed: output goes to a file, redacted below, and uploaded as an artifact.
+      - name: Terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock-timeout=5m -out=tfplan > plan.raw 2>&1
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Redact plan
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/scripts/redact-ids.sh" < plan.raw > plan.log
+          if [ "${{ steps.plan.outputs.exitcode }}" = "0" ]; then
+            terraform show -no-color tfplan | bash "$GITHUB_WORKSPACE/.github/scripts/redact-ids.sh" > plan.txt
+          fi
+          rm -f plan.raw
+
+      - name: Upload redacted plan
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plan-${{ matrix.stack }}
+          path: |
+            infra/stacks/${{ matrix.stack }}/plan.txt
+            infra/stacks/${{ matrix.stack }}/plan.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # The summary shows counts and resource addresses only (no values), so it is safe on a public repo.
+      - name: Job summary
+        run: |
+          {
+            echo "### Terraform plan: ${{ matrix.stack }}"
+            if [ "${{ steps.plan.outputs.exitcode }}" != "0" ]; then
+              echo "Plan **failed**. The redacted log is in the \`plan-${{ matrix.stack }}\` artifact."
+              if [ "${{ matrix.stack }}" = "app" ]; then
+                echo "For the app stack this is expected until the foundation stack has been applied once."
+              fi
+            else
+              bash "$GITHUB_WORKSPACE/.github/scripts/plan-summary.sh" "Changes"
+              echo
+              echo "Full redacted plan: \`plan-${{ matrix.stack }}\` artifact (kept 7 days)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail the job if the plan failed
+        if: steps.plan.outputs.exitcode != '0'
+        run: |
+          echo "::error::terraform plan failed for the ${{ matrix.stack }} stack. See the redacted plan-${{ matrix.stack }} artifact."
+          exit 1
