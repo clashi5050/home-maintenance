@@ -66,8 +66,11 @@ Deploy identity (the app registration behind `ARM_CLIENT_ID`), at **subscription
   Secrets User, Cognitive Services User) for `ServicePrincipal` principals, plus a small custom role that
   allows `Microsoft.Authorization/locks/*`. (Role facts checked against Microsoft Learn; whether the tighter
   variant applies cleanly was not tested.)
-* Access to the Terraform state storage account, as in the showcase site (its backend has no
-  `use_azuread_auth`, so the identity needs to list keys or you add that option).
+* **Storage Blob Data Contributor on the `tfstate` container** of the state storage account. Both stacks use
+  `use_azuread_auth = true` (in each `backend.hcl`), so state is reached with the identity's Entra token and the
+  identity does **not** need permission to list the account's keys. This differs from the showcase site's
+  backend, which uses key access; key access would let any identity that can list keys read and overwrite every
+  project's state on the shared account. Assign the role on the container, not the account.
 
 Federated credentials on that app registration (subject, issuer `https://token.actions.githubusercontent.com`,
 audience `api://AzureADTokenExchange`):
@@ -79,8 +82,9 @@ audience `api://AzureADTokenExchange`):
 | terraform-pr.yml (plan) | `repo:<owner>/<repo>:pull_request` |
 
 **Required for pull-request plans:** put the `pull_request` subject on a *separate, read-only* app registration
-(Reader on the subscription, plus the same state access) and set its client id as the variable
-`ARM_PLAN_CLIENT_ID`. Anyone who can push a branch to this repo can change the PR workflow, and whatever
+(**Reader** on the subscription, plus **Storage Blob Data Reader** on the `tfstate` container; nothing that can
+write) and set its client id as the variable `ARM_PLAN_CLIENT_ID`. Its plans run with `-lock=false` because taking
+the state lock is a write. Anyone who can push a branch to this repo can change the PR workflow, and whatever
 identity holds the `pull_request` subject runs their code, so that subject must never belong to the deploy
 identity. Without `ARM_PLAN_CLIENT_ID` the PR plan job is skipped (formatting, validation and the security scans
 still run, and the approver of `terraform-apply.yml` still sees the plan counts before anything is applied).
@@ -88,11 +92,31 @@ Never add the `pull_request` subject to the deploy identity.
 
 ### 2. GitHub
 
-Environments (Settings > Environments), each with **required reviewers** and, if you like, "deployment
-branches: main only":
+Environments (Settings > Environments), each with **required reviewers** and **"Deployment branches: Selected
+branches: main" (mandatory, not optional)**:
 
 * `azure-main`: gate for `terraform-apply.yml` (two jobs, so two approvals per run).
 * `azure-destroy`: gate for both destroy workflows.
+
+Why the branch rule is mandatory: the typed confirmations and the main-branch check live inside the workflow
+files, and anyone who can push a branch can edit a workflow. The federated credential subject
+(`...:environment:azure-destroy`) does not include a branch, so without the environment's branch rule a branch
+pusher could run a modified workflow under it. Also protect `main` (Settings > Branches: require a pull
+request and the checks) so nothing reaches it without review.
+
+## Safety nets against losing data
+
+* **Apply guard.** `terraform-apply.yml` reads the saved plan and stops if it would delete or replace the
+  storage account, a container or the Key Vault. The usual cause is changing a naming variable
+  (`AZ_COMPANY_LOC`, `AZ_APP`, `AZ_ENVIRONMENT`, `AZ_SHORT_LOC`), which renames those resources and makes
+  Terraform replace them. The approval comes before the plan exists, so this check is what catches it. To do it
+  on purpose, export your data, then start a **manual** run and tick `allow_data_replacement`.
+* **Locks.** `CanNotDelete` locks on the storage account and Key Vault (`enable_locks`), removed by Terraform
+  itself only when those resources are destroyed on purpose.
+* **Soft delete and versioning.** 30 days for blobs and containers; 90 days and purge protection on the vault.
+* **Geo copy.** The storage account is GZRS: a second region holds a copy (failover is manual).
+* **Destroy paths.** `destroy-app` never touches the data (it is in the foundation stack). `destroy-all` needs a
+  typed confirmation, a ticked "I have a final export" box, main-branch runs only and two approvals.
 
 Repository **variables**:
 

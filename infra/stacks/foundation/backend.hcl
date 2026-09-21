@@ -16,3 +16,10 @@
 resource_group_name  = "tfstatelab"
 storage_account_name = "tfstatestoragelab2"
 container_name       = "tfstate"
+
+# Entra ID access to the state blobs, not the storage account key. With key access, any identity that
+# can list the account's keys can read and overwrite EVERY project's state on this shared account
+# (including secrets kept in state). With this on, each identity only needs a role on the `tfstate`
+# container: Storage Blob Data Contributor for the deploy and destroy identity, Storage Blob Data
+# Reader for the read-only pull-request plan identity (see infra/README.md).
+use_azuread_auth = true

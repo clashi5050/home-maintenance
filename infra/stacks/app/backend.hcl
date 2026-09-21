@@ -11,3 +11,6 @@
 resource_group_name  = "tfstatelab"
 storage_account_name = "tfstatestoragelab2"
 container_name       = "tfstate"
+
+# Entra ID access to the state blobs, not the account key (see the foundation stack's backend.hcl).
+use_azuread_auth = true

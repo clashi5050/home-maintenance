@@ -6,7 +6,8 @@ set -euo pipefail
 
 expressions=()
 add() { # add <value> <placeholder>: skip empty values (an empty sed pattern is an error)
-  if [ -n "${1:-}" ]; then expressions+=(-e "s/$1/$2/g"); fi
+  # Case-insensitive (I): Azure often returns identifiers in lower case even when they were given in upper case.
+  if [ -n "${1:-}" ]; then expressions+=(-e "s/$1/$2/gI"); fi
 }
 
 add "${ARM_SUBSCRIPTION_ID:-}" '<subscription-id>'

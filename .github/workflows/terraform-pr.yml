@@ -212,7 +212,9 @@ jobs:
         id: plan
         run: |
           set +e
-          terraform plan -input=false -no-color -lock-timeout=5m -out=tfplan > plan.raw 2>&1
+          # -lock=false: this identity only has READ access to the state, and a plan must never block or
+          # change anything. (Taking the state lock is a write.)
+          terraform plan -input=false -no-color -lock=false -out=tfplan > plan.raw 2>&1
           echo "exitcode=$?" >> "$GITHUB_OUTPUT"
           exit 0
 

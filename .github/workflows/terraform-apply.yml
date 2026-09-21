@@ -19,6 +19,11 @@ on:
       - '.github/workflows/terraform-apply.yml'
   workflow_dispatch:
     inputs:
+      allow_data_replacement:
+        description: 'Allow this run to DELETE or REPLACE the storage account, its containers or the Key Vault. Export your data first.'
+        type: boolean
+        required: false
+        default: false
       image_digest:
         description: 'Optional image digest to deploy (sha256:...). Empty = the image built from this commit.'
         required: false
@@ -133,6 +138,26 @@ jobs:
           path: infra/stacks/foundation/plan.txt
           retention-days: 7
 
+      # DATA-LOSS GUARD. Changing a naming variable (company, app, environment, region) renames the storage
+      # account and Key Vault, which Terraform does by deleting them and creating new ones. Approval happens
+      # before this plan exists, so nobody would have seen it. This step reads the saved plan and stops the run
+      # if it would delete or replace the storage account, its containers or the Key Vault. To do that on
+      # purpose, start a MANUAL run and tick allow_data_replacement (after exporting your data).
+      # The plan JSON contains secret values, so it is piped straight into jq and never written or printed;
+      # only resource addresses (no values) are shown.
+      - name: Refuse to delete or replace stored data
+        env:
+          ALLOW_DATA_REPLACEMENT: ${{ github.event.inputs.allow_data_replacement }}
+        run: |
+          protected="$(terraform show -json tfplan | jq -r '[.resource_changes[]? | select(.change.actions | index("delete")) | select(.type | IN("azurerm_storage_account","azurerm_storage_container","azurerm_key_vault")) | .address] | join(", ")')"
+          if [ -n "${protected}" ]; then
+            if [ "${ALLOW_DATA_REPLACEMENT}" != "true" ]; then
+              echo "::error::This plan would delete or replace stored data: ${protected}. Nothing was applied. If this is intended, export your data first, then start a manual run of this workflow with allow_data_replacement ticked."
+              exit 1
+            fi
+            echo "::warning::Data-bearing resources will be deleted or replaced (allowed by allow_data_replacement): ${protected}"
+          fi
+
       - name: Terraform apply (saved plan)
         run: terraform apply -input=false -no-color -lock-timeout=10m tfplan
 
@@ -236,6 +261,26 @@ jobs:
           name: apply-plan-app
           path: infra/stacks/app/plan.txt
           retention-days: 7
+
+      # DATA-LOSS GUARD. Changing a naming variable (company, app, environment, region) renames the storage
+      # account and Key Vault, which Terraform does by deleting them and creating new ones. Approval happens
+      # before this plan exists, so nobody would have seen it. This step reads the saved plan and stops the run
+      # if it would delete or replace the storage account, its containers or the Key Vault. To do that on
+      # purpose, start a MANUAL run and tick allow_data_replacement (after exporting your data).
+      # The plan JSON contains secret values, so it is piped straight into jq and never written or printed;
+      # only resource addresses (no values) are shown.
+      - name: Refuse to delete or replace stored data
+        env:
+          ALLOW_DATA_REPLACEMENT: ${{ github.event.inputs.allow_data_replacement }}
+        run: |
+          protected="$(terraform show -json tfplan | jq -r '[.resource_changes[]? | select(.change.actions | index("delete")) | select(.type | IN("azurerm_storage_account","azurerm_storage_container","azurerm_key_vault")) | .address] | join(", ")')"
+          if [ -n "${protected}" ]; then
+            if [ "${ALLOW_DATA_REPLACEMENT}" != "true" ]; then
+              echo "::error::This plan would delete or replace stored data: ${protected}. Nothing was applied. If this is intended, export your data first, then start a manual run of this workflow with allow_data_replacement ticked."
+              exit 1
+            fi
+            echo "::warning::Data-bearing resources will be deleted or replaced (allowed by allow_data_replacement): ${protected}"
+          fi
 
       - name: Terraform apply (saved plan)
         run: terraform apply -input=false -no-color -lock-timeout=10m tfplan

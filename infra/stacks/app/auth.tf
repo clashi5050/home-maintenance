@@ -32,12 +32,11 @@ resource "azapi_resource" "auth" {
       globalValidation = {
         unauthenticatedClientAction = "RedirectToLoginPage"
         redirectToProvider          = "google"
+        # Only the health check is served without a login (and only /healthz: the app answers it before it
+        # looks at any identity header). Add public pages here only once they exist, and make the app ignore
+        # identity headers on those paths, so a forged header can never be mistaken for a sign-in.
         excludedPaths = [
           "/healthz",
-          "/security",
-          "/privacy",
-          "/style.css",
-          "/favicon.svg",
         ]
       }
 
