@@ -54,7 +54,14 @@ Register resource providers once (the deploy identity is deliberately not allowe
 `Microsoft.ManagedIdentity`, `Microsoft.CognitiveServices`, `Microsoft.Consumption`,
 `Microsoft.MarketplaceOrdering` (only for Claude). Check with `az provider list` (not run by the author).
 
-Deploy identity (the app registration behind `ARM_CLIENT_ID`), at **subscription scope**:
+Use a **dedicated** app registration for this project. Never reuse a shared one that other repositories also
+trust: this deploy has to be able to grant roles, and giving that power to a shared identity would let every
+repository that trusts it escalate itself. This project uses two identities:
+`gha-oidc-home-maintenance-deploy` (deploys and destroys; its client id is the variable `ARM_CLIENT_ID`) and
+`gha-oidc-home-maintenance-plan` (read-only, for pull-request plans; its client id is `ARM_PLAN_CLIENT_ID`).
+Neither has a client secret or certificate: OIDC only.
+
+The deploy identity needs, at **subscription scope**:
 
 * `Contributor`. Needed at subscription scope because Terraform creates the resource groups themselves; a
   role on a resource group cannot exist before that group does. It also covers the subscription budget.
@@ -72,18 +79,23 @@ Deploy identity (the app registration behind `ARM_CLIENT_ID`), at **subscription
   backend, which uses key access; key access would let any identity that can list keys read and overwrite every
   project's state on the shared account. Assign the role on the container, not the account.
 
-Federated credentials on that app registration (subject, issuer `https://token.actions.githubusercontent.com`,
-audience `api://AzureADTokenExchange`):
+Federated credentials (issuer `https://token.actions.githubusercontent.com`, audience
+`api://AzureADTokenExchange`). **Read the subject prefix from GitHub first.** GitHub now issues OIDC tokens with
+an immutable subject that embeds the numeric owner and repository ids, and a credential written in the plain
+`repo:<owner>/<repo>:...` form never matches (the login fails with `AADSTS70021`). Run
+`gh api repos/<owner>/<repo>/actions/oidc/customization/sub` and use its `sub_claim_prefix` exactly as returned.
+It looks like `repo:<owner>@<owner-id>/<repo>@<repo-id>`. The ids are not secret, but they are deliberately not
+written in this file.
 
-| Used by | Subject |
-|---|---|
-| terraform-apply.yml | `repo:<owner>/<repo>:environment:azure-main` |
-| destroy-app.yml, destroy-all.yml | `repo:<owner>/<repo>:environment:azure-destroy` |
-| terraform-pr.yml (plan) | `repo:<owner>/<repo>:pull_request` |
+| Used by | Held by | Subject |
+|---|---|---|
+| terraform-apply.yml | deploy identity | `<sub_claim_prefix>:environment:azure-main` |
+| destroy-app.yml, destroy-all.yml | deploy identity | `<sub_claim_prefix>:environment:azure-destroy` |
+| terraform-pr.yml (plan) | plan identity | `<sub_claim_prefix>:pull_request` |
 
-**Required for pull-request plans:** put the `pull_request` subject on a *separate, read-only* app registration
-(**Reader** on the subscription, plus **Storage Blob Data Reader** on the `tfstate` container; nothing that can
-write) and set its client id as the variable `ARM_PLAN_CLIENT_ID`. Its plans run with `-lock=false` because taking
+**Required for pull-request plans:** put the `pull_request` subject on a *separate, read-only* app registration,
+`gha-oidc-home-maintenance-plan` (**Reader** on the subscription, plus **Storage Blob Data Reader** on the
+`tfstate` container; nothing that can write) and set its client id as the variable `ARM_PLAN_CLIENT_ID`. Its plans run with `-lock=false` because taking
 the state lock is a write. Anyone who can push a branch to this repo can change the PR workflow, and whatever
 identity holds the `pull_request` subject runs their code, so that subject must never belong to the deploy
 identity. Without `ARM_PLAN_CLIENT_ID` the PR plan job is skipped (formatting, validation and the security scans
