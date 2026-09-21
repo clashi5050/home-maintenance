@@ -35,7 +35,13 @@ WORKDIR /app
 # Runtime dependencies: the Anthropic SDK (optional assistant) and the Azure SDKs (used only when
 # STORAGE_BACKEND=azure-blob or the Azure start command is used).
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# The package manager is only needed to install the dependencies above. It is removed afterwards
+# (the app runs with plain `node`), which keeps npm's own bundled libraries, and their vulnerabilities,
+# out of the image that actually runs.
+RUN npm ci --omit=dev && npm cache clean --force \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+           /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-* /root/.npm
 
 COPY seed.json ./
 COPY server ./server
