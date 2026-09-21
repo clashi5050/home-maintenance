@@ -62,6 +62,22 @@ test('a copy that loses the lock notices and stops itself', async () => {
   await intruder.release();
 });
 
+test('a renewal that hangs forever still stops the copy before the lock could expire', async () => {
+  let lost = null;
+  const hanging = { // a network path that accepts the call and never answers, so it never fails either
+    renewLease: () => new Promise(() => {}),
+    releaseLease: async () => {},
+    acquireLease: async () => {},
+  };
+  const blob = { uploadData: async () => {}, getBlobLeaseClient: () => hanging };
+  const l = new WriterLease(blob, { leaseSeconds: 1, renewEveryMs: 50, onLost: (err) => { lost = err; }, log: quiet });
+  await l.acquire();
+  for (let i = 0; i < 40 && !lost; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(lost, 'a stuck renewal must not keep the old copy writing');
+  assert.match(lost.message, /in time/);
+  assert.equal(l.held, false);
+});
+
 test('a copy that cannot renew stops itself before the lock could expire', async () => {
   let lost = null;
   const failing = { // a lock whose renewals keep failing with a network-style error

@@ -7,6 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { litestreamConfig, main, makeLease, startStandby } from '../server/bootstrap.js';
+import { createBlobService } from '../server/storage.js';
 import { EMULATOR_KEY, startAzurite } from './helpers/azurite.js';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -21,21 +22,33 @@ const freePort = () => new Promise((resolve) => {
 before(async () => {
   azurite = await startAzurite();
   env = {
-    LITESTREAM_ENABLED: 'true', LITESTREAM_ACCOUNT: 'devstoreaccount1', LITESTREAM_CONTAINER: 'replica', DATA_DIR: '/data',
+    LITESTREAM_ENABLED: 'true', LITESTREAM_ACCOUNT: 'devstoreaccount1', LITESTREAM_CONTAINER: 'replica', DATA_DIR: freshDataDir(),
     AZURE_STORAGE_CONNECTION_STRING: azurite.connectionString, AZURE_STORAGE_CREATE_CONTAINER: 'true', PORT: '0',
   };
 });
 after(() => azurite?.stop());
 
+const freshDataDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'hm-data-'));
+const dbFileOf = (e) => path.join(e.DATA_DIR, 'home-maintenance.db');
+
 /** A stand-in for the Litestream program that records what it was asked to do. */
-function fakeRun(events, { restoreExit = 0, replicate = async () => 0 } = {}) {
+function fakeRun(events, { restoreExit = 0, replicate = async () => 0, once = async () => 0, onRestore = () => {} } = {}) {
   return async (args) => {
     const step = args[0] + (args.includes('-once') ? '-once' : '');
     events.push(step);
-    if (step === 'restore') return restoreExit;
+    if (step === 'restore') { onRestore(); return restoreExit; }
     if (step === 'replicate') return replicate();
+    if (step === 'replicate-once') return once();
     return 0;
   };
+}
+
+/** Puts a blob under a replica path, so the backup looks like it already exists. */
+async function seedReplica(path_) {
+  const service = await createBlobService({ connectionString: azurite.connectionString });
+  const container = service.getContainerClient('replica');
+  await container.createIfNotExists();
+  await container.getBlockBlobClient(`${path_}/generations/0000.ltx`).uploadData(Buffer.from('backup'));
 }
 const fakeStandby = (events) => async () => {
   events.push('standby-up');
@@ -51,7 +64,7 @@ const spyLease = (events) => async (e, opts) => {
 
 test('the configuration names the replica and never includes a key unless the emulator needs one', () => {
   const text = litestreamConfig({ AZURE_STORAGE_ACCOUNT: 'homedata', DATA_DIR: '/data' });
-  assert.match(text, /path: \/data\/home-maintenance\.db/);
+  assert.match(text, /path: '\/data\/home-maintenance\.db'/);
   assert.match(text, /type: abs\n\s+account-name: homedata\n\s+bucket: replica\n\s+path: db\/home-maintenance/);
   assert.match(text, /sync-interval: 1s/);
   assert.match(text, /retention: 168h/);
@@ -101,7 +114,7 @@ test('a second copy does not restore or start until the first one has finished a
   const appA = new Promise((resolve) => { finishA = () => resolve(0); });
 
   const a = main({ env, log: quiet, exit: () => {}, run: fakeRun(eventsA, { replicate: () => appA }), standby: fakeStandby(eventsA), lease: spyLease(eventsA), signals: new EventEmitter() });
-  for (let i = 0; i < 100 && !eventsA.includes('replicate'); i++) await new Promise((r) => setTimeout(r, 50));
+  for (let i = 0; i < 300 && !eventsA.includes('replicate'); i++) await new Promise((r) => setTimeout(r, 50));
   assert.ok(eventsA.includes('replicate'), 'the first copy is running the app');
 
   const b = main({ env, log: quiet, exit: () => {}, run: fakeRun(eventsB), standby: fakeStandby(eventsB), lease: spyLease(eventsB), signals: new EventEmitter() });
@@ -119,7 +132,7 @@ test('a shutdown request while still waiting for the lock leaves cleanly', async
   let finishA;
   const eventsA = [];
   const a = main({ env, log: quiet, exit: () => {}, run: fakeRun(eventsA, { replicate: () => new Promise((r) => { finishA = () => r(0); }) }), standby: fakeStandby(eventsA), lease: spyLease(eventsA), signals: new EventEmitter() });
-  for (let i = 0; i < 100 && !eventsA.includes('replicate'); i++) await new Promise((r) => setTimeout(r, 50));
+  for (let i = 0; i < 300 && !eventsA.includes('replicate'); i++) await new Promise((r) => setTimeout(r, 50));
 
   const events = [];
   const exits = [];
@@ -132,6 +145,75 @@ test('a shutdown request while still waiting for the lock leaves cleanly', async
   assert.ok(!events.includes('restore'), 'it must not have started restoring');
   finishA();
   await a;
+});
+
+test('if a backup exists but the restore produced no database, nothing starts', async () => {
+  const e = { ...env, DATA_DIR: freshDataDir(), LITESTREAM_PATH: 'db/refuse' };
+  await seedReplica('db/refuse');
+  const events = [];
+  const exits = [];
+  // The restore "succeeds" (exit 0) without writing a file: the way a misjudged "no backup found" would look.
+  await main({ env: e, log: quiet, exit: (c) => exits.push(c), run: fakeRun(events), standby: fakeStandby(events), lease: spyLease(events), signals: new EventEmitter() });
+  assert.deepEqual(events, ['standby-up', 'lease-acquired', 'restore', 'standby-down', 'lease-released']);
+  assert.deepEqual(exits, [1], 'must not start the app or replicate an empty database');
+});
+
+test('if a backup exists and the restore produces the database, the app starts', async () => {
+  const e = { ...env, DATA_DIR: freshDataDir(), LITESTREAM_PATH: 'db/present' };
+  await seedReplica('db/present');
+  const events = [];
+  const exits = [];
+  const onRestore = () => fs.writeFileSync(dbFileOf(e), 'restored');
+  await main({ env: e, log: quiet, exit: (c) => exits.push(c), run: fakeRun(events, { onRestore }), standby: fakeStandby(events), lease: spyLease(events), signals: new EventEmitter() });
+  assert.ok(events.includes('replicate'));
+  assert.deepEqual(exits, [0]);
+});
+
+test('with no backup at all (a first start) the app may start on a new database', async () => {
+  const e = { ...env, DATA_DIR: freshDataDir(), LITESTREAM_PATH: 'db/never-used' };
+  const events = [];
+  const exits = [];
+  await main({ env: e, log: quiet, exit: (c) => exits.push(c), run: fakeRun(events), standby: fakeStandby(events), lease: spyLease(events), signals: new EventEmitter() });
+  assert.ok(events.includes('replicate'));
+  assert.deepEqual(exits, [0]);
+});
+
+test('a leftover local database is cleared first, so the restore is never skipped by it', async () => {
+  const e = { ...env, DATA_DIR: freshDataDir(), LITESTREAM_PATH: 'db/stale' };
+  for (const suffix of ['', '-wal', '-shm']) fs.writeFileSync(`${dbFileOf(e)}${suffix}`, 'stale');
+  const atRestore = [];
+  const onRestore = () => { for (const suffix of ['', '-wal', '-shm']) atRestore.push(fs.existsSync(`${dbFileOf(e)}${suffix}`)); };
+  await main({ env: e, log: quiet, exit: () => {}, run: fakeRun([], { onRestore }), standby: fakeStandby([]), lease: makeLease, signals: new EventEmitter() });
+  assert.deepEqual(atRestore, [false, false, false]);
+});
+
+test('a shutdown request during the final backup pass does not cut it short', async () => {
+  const e = { ...env, DATA_DIR: freshDataDir(), LITESTREAM_PATH: 'db/final-pass' };
+  const events = [];
+  const exits = [];
+  const signals = new EventEmitter();
+  let finishFinal;
+  const finalPass = new Promise((resolve) => { finishFinal = () => resolve(0); });
+  const done = main({ env: e, log: quiet, exit: (c) => exits.push(c), run: fakeRun(events, { once: () => finalPass }), standby: fakeStandby(events), lease: spyLease(events), signals });
+  for (let i = 0; i < 300 && !events.includes('replicate-once'); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(events.includes('replicate-once'), 'the final pass is running');
+
+  signals.emit('SIGTERM'); // arrives late, after the app has already stopped
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(exits, [], 'must not exit while the last copy is still being taken');
+  assert.ok(!events.includes('lease-released'), 'must not give the lock up early');
+
+  finishFinal();
+  await done;
+  assert.deepEqual(exits, [0]);
+  assert.equal(events.at(-1), 'lease-released');
+});
+
+test('a retention setting that is not a plain duration is refused', () => {
+  const ok = { AZURE_STORAGE_ACCOUNT: 'homedata' };
+  assert.match(litestreamConfig({ ...ok, LITESTREAM_RETENTION: '72h' }), /retention: 72h/);
+  assert.throws(() => litestreamConfig({ ...ok, LITESTREAM_RETENTION: '24h\nevil: true' }), /LITESTREAM_RETENTION/);
+  assert.throws(() => litestreamConfig({ ...ok, LITESTREAM_RETENTION: 'forever' }), /LITESTREAM_RETENTION/);
 });
 
 test('the waiting server says it is healthy but refuses real requests, and frees the port when closed', async () => {
@@ -155,7 +237,7 @@ test('without LITESTREAM_ENABLED the entry point just starts the app', async () 
   });
   try {
     let up = false;
-    for (let i = 0; i < 100 && !up; i++) {
+    for (let i = 0; i < 300 && !up; i++) {
       try { up = (await fetch(`http://127.0.0.1:${port}/healthz`)).ok; } catch { await new Promise((r) => setTimeout(r, 100)); }
     }
     assert.ok(up, 'the app should be serving');

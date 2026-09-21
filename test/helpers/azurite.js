@@ -23,10 +23,12 @@ export async function startAzurite() {
   ], { stdio: 'ignore' });
 
   const endpoint = `http://127.0.0.1:${port}/${EMULATOR_ACCOUNT}`;
-  for (let i = 0; i < 100; i++) {
+  // Patient on purpose: several test files start their own emulator at once, and on a busy or
+  // slow-disk machine one can take well over ten seconds to come up.
+  for (let i = 0; i < 600; i++) {
     try { await fetch(`${endpoint}?comp=list`); break; } catch { /* not listening yet */ }
     await new Promise((r) => setTimeout(r, 100));
-    if (i === 99) { child.kill(); throw new Error('Azurite did not start'); }
+    if (i === 599) { child.kill(); throw new Error('Azurite did not start within 60 seconds'); }
   }
   return {
     endpoint,

@@ -38,7 +38,7 @@ before(async () => {
     },
     stdio: 'ignore',
   });
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 300; i++) {
     try { if ((await fetch(`${base}/healthz`)).ok) return; } catch { /* not up yet */ }
     await new Promise((r) => setTimeout(r, 100));
   }

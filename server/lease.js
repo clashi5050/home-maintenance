@@ -15,15 +15,17 @@ export class WriterLease {
    * renewEveryMs: how often we refresh it.
    * onLost: called if we can no longer prove we hold the lock. Must stop all writing.
    */
-  constructor(blob, { leaseSeconds = 60, renewEveryMs = 20_000, onLost, log = console } = {}) {
+  constructor(blob, { leaseSeconds = 60, renewEveryMs = 20_000, renewTimeoutMs = 10_000, onLost, log = console } = {}) {
     this.blob = blob;
     this.leaseSeconds = leaseSeconds;
     this.renewEveryMs = renewEveryMs;
+    this.renewTimeoutMs = renewTimeoutMs;
     this.onLost = onLost ?? (() => process.exit(1));
     this.log = log;
     this.lease = null;
     this.timer = null;
     this.lastRenewed = 0;
+    this.renewing = false;
   }
 
   get held() { return this.lease !== null; }
@@ -49,28 +51,39 @@ export class WriterLease {
     }
     this.lease = lease;
     this.lastRenewed = Date.now();
-    this.timer = setInterval(() => this.#renew(), this.renewEveryMs);
+    this.timer = setInterval(() => this.#tick(), this.renewEveryMs);
     this.timer.unref();
     this.log.log('[lease] acquired the writer lock');
   }
 
-  async #renew() {
-    try {
-      await this.lease.renewLease();
-      this.lastRenewed = Date.now();
-    } catch (err) {
-      const someoneElseHasIt = [404, 409, 412].includes(err.statusCode);
-      // If renewals keep failing, stop before the lock could expire and be taken by a new copy.
-      const almostExpired = Date.now() - this.lastRenewed > this.leaseSeconds * 750;
-      if (!someoneElseHasIt && !almostExpired) {
-        this.log.error(`[lease] could not renew (will retry): ${err.message}`);
-        return;
-      }
-      this.stopRenewing();
-      this.lease = null;
-      this.log.error(`[lease] lost the writer lock (${err.message}); stopping`);
-      this.onLost(err);
+  #tick() {
+    if (!this.lease) return;
+    // The deadline is checked on every tick, whatever the last renewal is doing: a call that hangs
+    // (a stuck network path) never fails, and must not keep us writing after the lock could have expired
+    // and been taken by the next copy.
+    if (Date.now() - this.lastRenewed > this.leaseSeconds * 750) {
+      this.#lose(new Error('could not renew the lock in time'));
+      return;
     }
+    if (this.renewing) return; // one renewal at a time
+    this.renewing = true;
+    this.lease.renewLease({ abortSignal: AbortSignal.timeout(this.renewTimeoutMs) })
+      .then(() => { this.lastRenewed = Date.now(); })
+      .catch((err) => {
+        if ([404, 409, 412].includes(err.statusCode)) { // someone else holds it, or it expired
+          this.#lose(err);
+          return;
+        }
+        this.log.error(`[lease] could not renew (will retry): ${err.message}`);
+      })
+      .finally(() => { this.renewing = false; });
+  }
+
+  #lose(err) {
+    this.stopRenewing();
+    this.lease = null;
+    this.log.error(`[lease] lost the writer lock (${err.message}); stopping`);
+    this.onLost(err);
   }
 
   stopRenewing() {

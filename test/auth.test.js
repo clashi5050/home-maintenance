@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { authSettings, authenticate, isCrossSiteWrite, parsePrincipal } from '../server/auth.js';
 import { blockPrivateUrls, guardedPost, isBlockedAddress, urlProblem } from '../server/netguard.js';
 
@@ -55,6 +56,31 @@ test('easyauth: an email the provider says is unverified is rejected', () => {
   assert.equal(authenticate(request({ 'x-ms-client-principal': header }), easy()).status, 403);
 });
 
+test('easyauth: "verified" must be a plain true; odd spellings of false are still false', () => {
+  for (const value of ['False', 'FALSE', 'no', '0', 'nope']) {
+    const header = principalHeader({ extra: [{ typ: 'email_verified', val: value }] });
+    assert.equal(authenticate(request({ 'x-ms-client-principal': header }), easy()).status, 403, `email_verified=${value}`);
+  }
+  const yes = principalHeader({ extra: [{ typ: 'email_verified', val: 'True' }] });
+  assert.equal(authenticate(request({ 'x-ms-client-principal': yes }), easy()).ok, true);
+});
+
+test('easyauth: a provider we do not trust must prove the email is verified', () => {
+  const settings = easy();
+  const noClaim = principalHeader({ idp: 'aad' });
+  assert.equal(authenticate(request({ 'x-ms-client-principal': noClaim }), settings).status, 403, 'a directory admin can type any address');
+  const proven = principalHeader({ idp: 'aad', extra: [{ typ: 'email_verified', val: 'true' }] });
+  assert.equal(authenticate(request({ 'x-ms-client-principal': proven }), settings).ok, true);
+  const google = principalHeader({ idp: 'google' });
+  assert.equal(authenticate(request({ 'x-ms-client-principal': google }), settings).ok, true, 'Google verifies addresses itself');
+});
+
+test('the list of trusted providers can be changed', () => {
+  const settings = authSettings({ AUTH_MODE: 'easyauth', ALLOWED_EMAILS: 'me@example.com', TRUSTED_EMAIL_PROVIDERS: 'google, aad' });
+  assert.equal(authenticate(request({ 'x-ms-client-principal': principalHeader({ idp: 'aad' }) }), settings).ok, true);
+  assert.equal(authenticate(request({ 'x-ms-client-principal': principalHeader({ idp: 'github' }) }), settings).status, 403);
+});
+
 test('cross-site writes are caught; same-site writes and scripts are not', () => {
   const host = 'home.example.net';
   assert.equal(isCrossSiteWrite(request({ host, origin: `https://${host}` }, 'POST')), false, 'same origin');
@@ -68,7 +94,12 @@ test('cross-site writes are caught; same-site writes and scripts are not', () =>
 });
 
 test('internal and metadata addresses are recognised, public ones are not', () => {
-  for (const bad of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1', 'fe80::1', 'fd00::1', '::ffff:127.0.0.1', '::ffff:169.254.169.254', 'not-an-ip']) {
+  for (const bad of [
+    '127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '::1',
+    'fe80::1', 'fd00::1', '::ffff:127.0.0.1', '::ffff:169.254.169.254', 'not-an-ip',
+    '168.63.129.16', // Azure's platform service address
+    '64:ff9b::a9fe:a9fe', '2002:a9fe:a9fe::1', '2001:0:4136:e378:8000:63bf:3fff:fdd2', // IPv4 hidden inside IPv6 (NAT64, 6to4, Teredo)
+  ]) {
     assert.equal(isBlockedAddress(bad), true, `${bad} should be blocked`);
   }
   for (const good of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '93.184.216.34', '2606:4700:4700::1111']) {
@@ -91,6 +122,21 @@ test('URLs that point inward or use odd forms are refused before any request is 
 test('the guarded request refuses internal destinations, including a name that resolves to one', async () => {
   await assert.rejects(() => guardedPost('http://127.0.0.1/topic', { body: 'x' }), { code: 'EBLOCKED' });
   await assert.rejects(() => guardedPost('http://localhost/topic', { body: 'x' }), { code: 'EBLOCKED' }); // resolves to loopback
+});
+
+test('a server that never finishes answering is cut off after an overall deadline', async () => {
+  // A fake HTTP client whose request never produces a response, as a slow-drip server would look.
+  const stuck = {
+    request: () => {
+      const req = new EventEmitter();
+      req.destroy = (err) => setImmediate(() => req.emit('error', err));
+      req.end = () => {};
+      return req;
+    },
+  };
+  const started = Date.now();
+  await assert.rejects(() => guardedPost('https://ntfy.sh/topic', { body: 'x', deadlineMs: 100, _client: stuck }), { code: 'ETIMEDOUT' });
+  assert.ok(Date.now() - started < 2000, 'it gave up quickly');
 });
 
 test('the guard is on for shared hosting and off for a home network', () => {

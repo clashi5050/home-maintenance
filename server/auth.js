@@ -20,7 +20,13 @@ export function authSettings(env = process.env) {
   const allowedEmails = new Set(
     (env.ALLOWED_EMAILS || '').split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean),
   );
-  return { mode, basicAuth: env.BASIC_AUTH || '', allowedEmails };
+  // Providers whose email addresses are always verified (Google checks them). For any other provider
+  // (a work or school directory, GitHub, Facebook...) the address can be typed in by the account owner or
+  // a tenant admin, so it only counts when the token itself says it is verified.
+  const trustedProviders = new Set(
+    (env.TRUSTED_EMAIL_PROVIDERS || 'google').split(/[\s,;]+/).map((p) => p.trim().toLowerCase()).filter(Boolean),
+  );
+  return { mode, basicAuth: env.BASIC_AUTH || '', allowedEmails, trustedProviders };
 }
 
 const EMAIL_CLAIMS = [
@@ -47,12 +53,14 @@ export function parsePrincipal(headers) {
   };
   const id = headers['x-ms-client-principal-id'] || first(ID_CLAIMS);
   if (!id) return null;
+  const verified = first(['email_verified']).trim().toLowerCase();
   return {
     id: String(id),
-    idp: String(headers['x-ms-client-principal-idp'] || data.auth_typ || ''),
+    idp: String(headers['x-ms-client-principal-idp'] || data.auth_typ || '').toLowerCase(),
     email: first(EMAIL_CLAIMS, (v) => v.includes('@')).trim().toLowerCase(),
     name: String(headers['x-ms-client-principal-name'] || ''),
-    emailVerified: first(['email_verified']) !== 'false', // providers that report it must say it is verified
+    // true / false when the token says so, null when it says nothing.
+    emailVerified: verified === 'true' ? true : verified === '' ? null : false,
   };
 }
 
@@ -77,7 +85,10 @@ export function authenticate(req, settings) {
   const user = parsePrincipal(req.headers);
   if (!user) return denied(401, 'Please sign in', 'You need to <a href="/.auth/login/google">sign in</a> to use Home Maintenance.');
   if (!user.email) return denied(403, 'No email address', 'Your sign-in did not include an email address, so we cannot tell who you are.');
-  if (!user.emailVerified) return denied(403, 'Email not verified', 'Please verify your email address with your sign-in provider and try again.');
+  // Anything but a plain "true" is refused, except from a provider we trust to verify addresses itself.
+  if (user.emailVerified === false || (user.emailVerified === null && !settings.trustedProviders.has(user.idp))) {
+    return denied(403, 'Email not verified', 'Please verify your email address with your sign-in provider and try again.');
+  }
   // Fail closed: with no list configured nobody gets in.
   if (!settings.allowedEmails.has(user.email)) {
     return denied(403, 'Not on the list', 'This account is not allowed to use this site. <a href="/.auth/logout">Sign out</a>');
