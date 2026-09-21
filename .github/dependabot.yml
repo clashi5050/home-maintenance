@@ -1,0 +1,51 @@
+# =============================================================================
+# dependabot.yml
+# -----------------------------------------------------------------------------
+# Weekly update pull requests for everything that is pinned:
+#   npm             app dependencies (package.json / package-lock.json)
+#   github-actions  workflow actions, which are pinned by full commit SHA; Dependabot updates the
+#                   SHA and the version comment together
+#   terraform       provider version constraints, one entry per stack directory
+#   docker          the base image in the Dockerfile
+#   pip             the pinned checkov version in .github/ci/requirements.txt
+# Dependabot pull requests do not receive repository secrets or an Azure token, so the Terraform PR
+# workflow skips the plan job for them (validate and the security scans still run).
+# =============================================================================
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: terraform
+    directory: /infra/stacks/foundation
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: terraform
+    directory: /infra/stacks/app
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: pip
+    directory: /.github/ci
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2

@@ -1,0 +1,3 @@
+# Tools installed by the Terraform PR workflow. Pinned so a scan result is reproducible;
+# Dependabot (pip, see .github/dependabot.yml) proposes upgrades as pull requests.
+checkov==3.3.19

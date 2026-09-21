@@ -1,9 +1,10 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { DATA_DIR, SETTING_DEFAULTS, db, getSettings, saveSetting } from './db.js';
+import { authSettings, authenticate, isCrossSiteWrite } from './auth.js';
+import { DATA_DIR, SETTING_DEFAULTS, db, getSettings, recordAudit, saveSetting } from './db.js';
+import { blockPrivateUrls, urlProblem } from './netguard.js';
 import { today } from './dates.js';
 import * as store from './resources.js';
 import { budgetFor, setBudget, summary } from './summary.js';
@@ -18,7 +19,7 @@ import { HttpError, clean } from './validate.js';
 
 const PORT = Number(process.env.PORT) || 8080;
 const PUBLIC_DIR = fileURLToPath(new URL('../public', import.meta.url));
-const BASIC_AUTH = process.env.BASIC_AUTH || ''; // optional "user:password"
+const AUTH = authSettings(); // AUTH_MODE: none, basic (BASIC_AUTH=user:password) or easyauth (Azure sign-in)
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -50,6 +51,10 @@ function updateSettings(body) {
   const values = clean(SETTINGS_FIELDS, body, { partial: true });
   if (values.notify_time != null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(values.notify_time)) throw new HttpError(400, 'Notify time must look like 08:00');
   if (values.ntfy_url != null && !/^https?:\/\/[^\s]+$/.test(values.ntfy_url)) throw new HttpError(400, 'ntfy server must start with http:// or https://');
+  if (values.ntfy_url && blockPrivateUrls()) {
+    const problem = urlProblem(values.ntfy_url);
+    if (problem) throw new HttpError(400, `ntfy server: ${problem}`);
+  }
   if (values.app_url != null && !/^https?:\/\/[^\s]+$/.test(values.app_url)) throw new HttpError(400, 'App address must start with http:// or https://');
   for (const [key, value] of Object.entries(values)) {
     // Empty values fall back to defaults, except the token, which can be cleared.
@@ -144,9 +149,9 @@ route('GET', '/api/documents', (ctx) => docs.listDocuments({
 }));
 route('POST', '/api/documents', async (ctx) => { const doc = await docs.saveUpload(ctx.req, ctx.query); ctx.status = 201; return doc; }, { raw: true });
 route('PUT', '/api/documents/(\\d+)', (ctx) => docs.updateDocument(idOf(ctx), ctx.body));
-route('DELETE', '/api/documents/(\\d+)', (ctx) => { docs.deleteDocument(idOf(ctx)); ctx.status = 204; });
-route('GET', '/api/documents/(\\d+)/file', (ctx) => {
-  docs.sendDocument(ctx.res, idOf(ctx), { download: ctx.query.get('download') === '1' });
+route('DELETE', '/api/documents/(\\d+)', async (ctx) => { await docs.deleteDocument(idOf(ctx)); ctx.status = 204; });
+route('GET', '/api/documents/(\\d+)/file', async (ctx) => {
+  await docs.sendDocument(ctx.res, idOf(ctx), { download: ctx.query.get('download') === '1' });
   return HANDLED;
 });
 
@@ -241,6 +246,8 @@ async function handleApi(req, res, url) {
     const ctx = { params: match.slice(1), query: url.searchParams, body: {}, status: 200, headers: {}, req, res };
     if (!r.raw && (req.method === 'POST' || req.method === 'PUT')) ctx.body = await readBody(req, r.maxBody);
     const result = await r.handler(ctx);
+    // Who changed what, when people sign in with their own accounts.
+    if (req.user && req.method !== 'GET') recordAudit(req.user.email || req.user.id, req.method, url.pathname, ctx.status);
     if (result === HANDLED) return undefined;
     if (result && '__raw' in result) {
       res.writeHead(200, { 'Cache-Control': 'no-store', ...ctx.headers });
@@ -266,26 +273,27 @@ function serveStatic(req, res, url) {
   fs.createReadStream(file).pipe(res);
 }
 
-const digest = (s) => crypto.createHash('sha256').update(s).digest();
-function authorized(req) {
-  if (!BASIC_AUTH) return true;
-  const header = req.headers.authorization || '';
-  if (!header.startsWith('Basic ')) return false;
-  const given = Buffer.from(header.slice(6), 'base64').toString('utf8');
-  return crypto.timingSafeEqual(digest(given), digest(BASIC_AUTH));
-}
-
 const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'");
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+  // Tell browsers to use HTTPS only, when we are actually being served over it.
+  if (AUTH.mode === 'easyauth' || req.headers['x-forwarded-proto'] === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
   try {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/healthz') return sendJson(res, 200, { ok: true });
-    if (!authorized(req)) {
-      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Home Maintenance"' });
-      return res.end('Authentication required');
+    const who = authenticate(req, AUTH);
+    if (!who.ok) {
+      res.writeHead(who.status, who.headers);
+      return res.end(who.body);
     }
+    req.user = who.user; // null unless people sign in with their own accounts
+    if (AUTH.mode !== 'none' && isCrossSiteWrite(req)) throw new HttpError(403, 'Cross-site request blocked');
     if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
     return serveStatic(req, res, url);
   } catch (err) {

@@ -1,5 +1,6 @@
-// Receipts, manuals, warranties and photos. Files live on disk in DATA_DIR/files,
-// metadata lives in SQLite. Uploads are raw request bodies (no multipart parsing).
+// Receipts, manuals, warranties and photos. File bytes live in the storage backend (DATA_DIR/files on
+// disk by default, or an Azure Blob container), metadata lives in SQLite. Uploads are raw request
+// bodies (no multipart parsing).
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -7,10 +8,19 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { DOC_CATEGORIES } from './catalog.js';
 import { DATA_DIR, db } from './db.js';
+import { storageFromEnv } from './storage.js';
 import { HttpError, clean } from './validate.js';
 
 export const FILES_DIR = path.join(DATA_DIR, 'files');
-fs.mkdirSync(FILES_DIR, { recursive: true });
+export const storage = await storageFromEnv(process.env, { filesDir: FILES_DIR });
+
+// Uploads are checked in a scratch folder first and only then handed to the storage backend.
+const TMP_DIR = path.join(DATA_DIR, 'tmp');
+fs.mkdirSync(TMP_DIR, { recursive: true });
+for (const name of fs.readdirSync(TMP_DIR)) { // leftovers from an upload that was cut off
+  const file = path.join(TMP_DIR, name);
+  if (Date.now() - fs.statSync(file).mtimeMs > 3_600_000) fs.rmSync(file, { force: true });
+}
 
 export const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 25) * 1024 * 1024;
 
@@ -80,7 +90,7 @@ export function getDocument(id) {
   return row;
 }
 
-/** Streams an upload to disk. File name comes from the X-Filename header, details from the query string. */
+/** Streams an upload to a scratch file, checks it, then stores it. File name comes from the X-Filename header, details from the query string. */
 export async function saveUpload(req, query) {
   const filename = cleanFilename(decodeURIComponent(req.headers['x-filename'] || ''));
   const ext = path.extname(filename).toLowerCase();
@@ -94,7 +104,7 @@ export async function saveUpload(req, query) {
   if (!meta.title) meta.title = path.basename(filename, ext);
 
   const storedName = `${crypto.randomUUID()}${ext}`;
-  const tmp = path.join(FILES_DIR, `.upload-${storedName}`);
+  const tmp = path.join(TMP_DIR, `upload-${storedName}`);
   let size = 0;
   const limiter = new Transform({
     transform(chunk, _enc, cb) {
@@ -112,7 +122,7 @@ export async function saveUpload(req, query) {
       try { fs.readSync(fd, head, 0, 12, 0); } finally { fs.closeSync(fd); }
       if (!type.magic(head)) throw new HttpError(415, 'The file contents do not match its type');
     }
-    fs.renameSync(tmp, path.join(FILES_DIR, storedName));
+    await storage.putFile(storedName, tmp, { contentType: type.mime });
   } catch (err) {
     fs.rmSync(tmp, { force: true });
     throw err;
@@ -125,7 +135,7 @@ export async function saveUpload(req, query) {
       .run(filename, storedName, type.mime, size, ...Object.values(meta));
     return getDocument(Number(res.lastInsertRowid));
   } catch (err) {
-    fs.rmSync(path.join(FILES_DIR, storedName), { force: true });
+    await storage.remove(storedName).catch((e) => console.error(`[documents] could not clean up ${storedName}: ${e.message}`));
     throw err;
   }
 }
@@ -141,19 +151,20 @@ export function updateDocument(id, body) {
   return getDocument(id);
 }
 
-export function deleteDocument(id) {
+export async function deleteDocument(id) {
   getDocument(id);
   const { stored_name: stored } = db.prepare('SELECT stored_name FROM documents WHERE id = ?').get(id);
   db.prepare('DELETE FROM documents WHERE id = ?').run(id);
-  fs.rmSync(path.join(FILES_DIR, stored), { force: true });
+  // The record is already gone, so a storage hiccup must not turn into an error the user can't act on.
+  await storage.remove(stored).catch((e) => console.error(`[documents] could not delete ${stored}: ${e.message}`));
 }
 
 /** Sends the file with headers that keep it from ever being treated as a web page. */
-export function sendDocument(res, id, { download = false } = {}) {
+export async function sendDocument(res, id, { download = false } = {}) {
   getDocument(id);
   const row = db.prepare('SELECT filename, stored_name, mime, size FROM documents WHERE id = ?').get(id);
-  const file = path.join(FILES_DIR, row.stored_name);
-  if (!fs.existsSync(file)) throw new HttpError(404, 'The file is missing from storage');
+  const file = await storage.openRead(row.stored_name);
+  if (!file) throw new HttpError(404, 'The file is missing from storage');
 
   const ext = path.extname(row.filename).toLowerCase();
   const inline = !download && TYPES[ext]?.inline;
@@ -167,5 +178,10 @@ export function sendDocument(res, id, { download = false } = {}) {
   // Chrome's built-in PDF viewer won't run under a sandboxed CSP, so PDFs keep the app-wide policy instead.
   if (ext !== '.pdf') headers['Content-Security-Policy'] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self'";
   res.writeHead(200, headers);
-  fs.createReadStream(file).pipe(res);
+  try {
+    await pipeline(file.stream, res);
+  } catch (err) {
+    console.error(`[documents] download of ${row.stored_name} failed: ${err.message}`);
+    res.destroy(); // headers are already out, so the only honest signal left is a cut connection
+  }
 }

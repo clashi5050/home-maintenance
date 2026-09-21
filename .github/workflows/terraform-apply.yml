@@ -1,0 +1,286 @@
+# Workflow name shown in the GitHub Actions UI
+name: 'Terraform apply'
+
+# Applies the foundation stack, then the app stack. Runs when infrastructure code lands on main, or by hand.
+#
+# APPROVAL GATE: both jobs use the `azure-main` GitHub environment. The owner configures required
+# reviewers on that environment, so each job pauses until someone approves it (two approvals per run).
+# The federated credential subject for both jobs is repo:<owner>/<repo>:environment:azure-main.
+#
+# NOTE: a change to the application code alone does not touch infra/**, so it does not start this
+# workflow. To roll out a new image, run this workflow by hand (Actions > Terraform apply > Run
+# workflow): it deploys the image built from the commit it runs on, or the digest you paste in
+# (which is also how you roll back).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/terraform-apply.yml'
+  workflow_dispatch:
+    inputs:
+      allow_data_replacement:
+        description: 'Allow this run to DELETE or REPLACE the storage account, its containers or the Key Vault. Export your data first.'
+        type: boolean
+        required: false
+        default: false
+      image_digest:
+        description: 'Optional image digest to deploy (sha256:...). Empty = the image built from this commit.'
+        required: false
+        default: ''
+
+# One apply at a time; a second run waits instead of racing the state lock. Never cancel a running apply.
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: '1.16.3'
+  TF_IN_AUTOMATION: 'true'
+  ARM_USE_OIDC: 'true'
+  ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+  TFSTATE_SUBSCRIPTION_ID: ${{ secrets.TFSTATE_SUBSCRIPTION_ID }}
+  TF_VAR_arm_client_id: ${{ vars.ARM_CLIENT_ID }}
+  TF_VAR_arm_tenant_id: ${{ vars.ARM_TENANT_ID }}
+  TF_VAR_arm_subscription_id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+  TF_VAR_company_loc: ${{ vars.AZ_COMPANY_LOC }}
+  TF_VAR_short_loc: ${{ vars.AZ_SHORT_LOC }}
+  TF_VAR_location: ${{ vars.AZ_LOCATION }}
+  TF_VAR_app: ${{ vars.AZ_APP || 'homemaint' }}
+  TF_VAR_environment: ${{ vars.AZ_ENVIRONMENT || 'main' }}
+  TF_VAR_private_networking: ${{ vars.AZ_PRIVATE_NETWORKING || 'true' }}
+  TF_VAR_monthly_budget: ${{ vars.AZ_MONTHLY_BUDGET || '75' }}
+  TF_VAR_alert_emails: ${{ secrets.ALERT_EMAILS }}
+  TF_VAR_allowed_emails: ${{ secrets.ALLOWED_EMAILS }}
+  TF_VAR_google_client_id: ${{ vars.GOOGLE_CLIENT_ID }}
+  TF_VAR_google_secret_source: ${{ vars.GOOGLE_SECRET_SOURCE || 'keyvault' }}
+  TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+  TF_VAR_enable_claude: ${{ vars.ENABLE_CLAUDE || 'false' }}
+  TF_VAR_claude_organization_name: ${{ vars.CLAUDE_ORGANIZATION_NAME }}
+  TF_VAR_claude_country_code: ${{ vars.CLAUDE_COUNTRY_CODE }}
+  TF_VAR_claude_industry: ${{ vars.CLAUDE_INDUSTRY }}
+  TF_VAR_claude_model_name: ${{ vars.CLAUDE_MODEL_NAME || 'claude-opus-5' }}
+  TF_VAR_claude_model_version: ${{ vars.CLAUDE_MODEL_VERSION || '1' }}
+
+jobs:
+  foundation:
+    name: 'Apply foundation'
+    # Only ever from main, whatever ref a manual run was started on.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: azure-main
+    permissions:
+      contents: read
+      id-token: write   # OIDC token for azure/login and the azurerm provider
+    defaults:
+      run:
+        working-directory: infra/stacks/foundation
+    steps:
+      - name: Mask identifiers in logs
+        run: |
+          echo "::add-mask::${ARM_SUBSCRIPTION_ID}"
+          echo "::add-mask::${ARM_TENANT_ID}"
+          echo "::add-mask::${ARM_CLIENT_ID}"
+          echo "::add-mask::${TFSTATE_SUBSCRIPTION_ID}"
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Login to Azure with OIDC federated credentials
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config=backend.hcl \
+            -backend-config="key=${TF_VAR_environment}-${TF_VAR_short_loc}-${TF_VAR_app}-foundation.tfstate" \
+            -backend-config="subscription_id=${TFSTATE_SUBSCRIPTION_ID}"
+
+      # The plan is saved to a file and that exact file is applied, so what runs is what was planned.
+      # The plan itself is never printed (the log of a public repository is public); only errors are,
+      # with the Azure identifiers replaced.
+      - name: Terraform plan (saved)
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock-timeout=10m -out=tfplan > plan.raw 2>&1
+          status=$?
+          if [ "${status}" -ne 0 ]; then
+            echo "::error::terraform plan failed. Error output, with identifiers replaced:"
+            bash "$GITHUB_WORKSPACE/.github/scripts/redact-ids.sh" < plan.raw | tail -n 60
+            exit 1
+          fi
+
+      - name: Redact plan and summarise
+        run: |
+          terraform show -no-color tfplan | bash "$GITHUB_WORKSPACE/.github/scripts/redact-ids.sh" > plan.txt
+          rm -f plan.raw
+          bash "$GITHUB_WORKSPACE/.github/scripts/plan-summary.sh" "Foundation plan" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload redacted plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apply-plan-foundation
+          path: infra/stacks/foundation/plan.txt
+          retention-days: 7
+
+      # DATA-LOSS GUARD. Changing a naming variable (company, app, environment, region) renames the storage
+      # account and Key Vault, which Terraform does by deleting them and creating new ones. Approval happens
+      # before this plan exists, so nobody would have seen it. This step reads the saved plan and stops the run
+      # if it would delete or replace the storage account, its containers or the Key Vault. To do that on
+      # purpose, start a MANUAL run and tick allow_data_replacement (after exporting your data).
+      # The plan JSON contains secret values, so it is piped straight into jq and never written or printed;
+      # only resource addresses (no values) are shown.
+      - name: Refuse to delete or replace stored data
+        env:
+          ALLOW_DATA_REPLACEMENT: ${{ github.event.inputs.allow_data_replacement }}
+        run: |
+          protected="$(terraform show -json tfplan | jq -r '[.resource_changes[]? | select(.change.actions | index("delete")) | select(.type | IN("azurerm_storage_account","azurerm_storage_container","azurerm_key_vault")) | .address] | join(", ")')"
+          if [ -n "${protected}" ]; then
+            if [ "${ALLOW_DATA_REPLACEMENT}" != "true" ]; then
+              echo "::error::This plan would delete or replace stored data: ${protected}. Nothing was applied. If this is intended, export your data first, then start a manual run of this workflow with allow_data_replacement ticked."
+              exit 1
+            fi
+            echo "::warning::Data-bearing resources will be deleted or replaced (allowed by allow_data_replacement): ${protected}"
+          fi
+
+      - name: Terraform apply (saved plan)
+        run: terraform apply -input=false -no-color -lock-timeout=10m tfplan
+
+  app:
+    name: 'Apply app'
+    needs: foundation
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: azure-main
+    permissions:
+      contents: read
+      id-token: write   # OIDC token for azure/login and the azurerm provider
+      packages: read    # read the image digest from GHCR
+    defaults:
+      run:
+        working-directory: infra/stacks/app
+    steps:
+      - name: Mask identifiers in logs
+        run: |
+          echo "::add-mask::${ARM_SUBSCRIPTION_ID}"
+          echo "::add-mask::${ARM_TENANT_ID}"
+          echo "::add-mask::${ARM_CLIENT_ID}"
+          echo "::add-mask::${TFSTATE_SUBSCRIPTION_ID}"
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Login to Azure with OIDC federated credentials
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ env.ARM_CLIENT_ID }}
+          tenant-id: ${{ env.ARM_TENANT_ID }}
+          subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The image is built by docker.yml on the same push and tagged sha-<first 7 of the commit>.
+      # Wait for it (up to 15 minutes), then pin the deploy to its digest so the app runs exactly
+      # that build. The Container App pulls it anonymously, so the GHCR package must be public.
+      - name: Resolve image digest
+        env:
+          INPUT_DIGEST: ${{ github.event.inputs.image_digest }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          digest="${INPUT_DIGEST:-}"
+          if [ -z "${digest}" ]; then
+            ref="ghcr.io/${owner}/home-maintenance:sha-${GITHUB_SHA::7}"
+            for attempt in $(seq 1 30); do
+              digest="$(docker buildx imagetools inspect "${ref}" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+              if [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then break; fi
+              echo "Waiting for ${ref} to be published (attempt ${attempt}/30)..."
+              digest=""
+              sleep 30
+            done
+          fi
+          if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::No image digest available. The image for this commit was not found on ghcr.io (did the 'Build image' workflow pass?), and no valid image_digest input was given."
+            exit 1
+          fi
+          echo "Deploying digest ${digest}"
+          echo "TF_VAR_image=ghcr.io/${owner}/home-maintenance@${digest}" >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        run: |
+          terraform init -input=false \
+            -backend-config=backend.hcl \
+            -backend-config="key=${TF_VAR_environment}-${TF_VAR_short_loc}-${TF_VAR_app}-app.tfstate" \
+            -backend-config="subscription_id=${TFSTATE_SUBSCRIPTION_ID}"
+
+      - name: Terraform plan (saved)
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock-timeout=10m -out=tfplan > plan.raw 2>&1
+          status=$?
+          if [ "${status}" -ne 0 ]; then
+            echo "::error::terraform plan failed. Error output, with identifiers replaced:"
+            bash "$GITHUB_WORKSPACE/.github/scripts/redact-ids.sh" < plan.raw | tail -n 60
+            exit 1
+          fi
+
+      - name: Redact plan and summarise
+        run: |
+          terraform show -no-color tfplan | bash "$GITHUB_WORKSPACE/.github/scripts/redact-ids.sh" > plan.txt
+          rm -f plan.raw
+          bash "$GITHUB_WORKSPACE/.github/scripts/plan-summary.sh" "App plan" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload redacted plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apply-plan-app
+          path: infra/stacks/app/plan.txt
+          retention-days: 7
+
+      # DATA-LOSS GUARD. Changing a naming variable (company, app, environment, region) renames the storage
+      # account and Key Vault, which Terraform does by deleting them and creating new ones. Approval happens
+      # before this plan exists, so nobody would have seen it. This step reads the saved plan and stops the run
+      # if it would delete or replace the storage account, its containers or the Key Vault. To do that on
+      # purpose, start a MANUAL run and tick allow_data_replacement (after exporting your data).
+      # The plan JSON contains secret values, so it is piped straight into jq and never written or printed;
+      # only resource addresses (no values) are shown.
+      - name: Refuse to delete or replace stored data
+        env:
+          ALLOW_DATA_REPLACEMENT: ${{ github.event.inputs.allow_data_replacement }}
+        run: |
+          protected="$(terraform show -json tfplan | jq -r '[.resource_changes[]? | select(.change.actions | index("delete")) | select(.type | IN("azurerm_storage_account","azurerm_storage_container","azurerm_key_vault")) | .address] | join(", ")')"
+          if [ -n "${protected}" ]; then
+            if [ "${ALLOW_DATA_REPLACEMENT}" != "true" ]; then
+              echo "::error::This plan would delete or replace stored data: ${protected}. Nothing was applied. If this is intended, export your data first, then start a manual run of this workflow with allow_data_replacement ticked."
+              exit 1
+            fi
+            echo "::warning::Data-bearing resources will be deleted or replaced (allowed by allow_data_replacement): ${protected}"
+          fi
+
+      - name: Terraform apply (saved plan)
+        run: terraform apply -input=false -no-color -lock-timeout=10m tfplan
