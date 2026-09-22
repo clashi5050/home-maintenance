@@ -25,9 +25,12 @@
 # =============================================================================
 
 locals {
-  claude_org_ok      = trimspace(coalesce(var.claude_organization_name, "")) != ""
-  claude_country_ok  = trimspace(coalesce(var.claude_country_code, "")) != ""
-  claude_industry_ok = trimspace(coalesce(var.claude_industry, "")) != ""
+  # coalesce errors when all arguments are empty strings (e.g. TF_VAR_* set to "" by a missing
+  # GitHub variable). Use null-and-empty-safe guards instead so the check works regardless of
+  # whether the caller passes null or "".
+  claude_org_ok      = var.claude_organization_name != null && trimspace(var.claude_organization_name) != ""
+  claude_country_ok  = var.claude_country_code != null && trimspace(var.claude_country_code) != ""
+  claude_industry_ok = var.claude_industry != null && trimspace(var.claude_industry) != ""
 
   # Preview API version taken from the Azure-Samples/claude sample, which is what accepts
   # modelProviderData. Not verified against the REST reference here.
