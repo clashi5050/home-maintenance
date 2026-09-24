@@ -53,6 +53,12 @@ provider "azurerm" {
     log_analytics_workspace {
       permanently_delete_on_destroy = true
     }
+    # Application Insights auto-creates "Failure Anomalies" smart-detection rules and a default
+    # action group that are not in Terraform state. Without this flag the provider refuses to
+    # delete the resource group while those unmanaged resources still exist.
+    resource_group {
+      prevent_deletion_if_contains_resources = false
+    }
   }
 
   use_oidc        = true
