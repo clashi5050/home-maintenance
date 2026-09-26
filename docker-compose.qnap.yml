@@ -1,0 +1,38 @@
+# QNAP Container Station deployment
+#
+# 1. Copy this file to your QNAP (e.g. /share/Container/home-maintenance/)
+# 2. In Container Station → Create → Create Application, import this file
+# 3. Set the BASIC_AUTH value below to "yourname:yourpassword"
+#
+# Data lives at /share/Container/home-maintenance/data on the QNAP.
+# The SQLite database and uploaded documents survive container restarts.
+#
+# To update the app: pull the new image and recreate the container.
+#   docker compose -f docker-compose.qnap.yml pull
+#   docker compose -f docker-compose.qnap.yml up -d
+
+services:
+  home-maintenance:
+    image: clashi5050/home-maintenance:latest
+    container_name: home-maintenance
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      AUTH_MODE: basic
+      # Format: "username:password"  — change this before deploying
+      BASIC_AUTH: "admin:shields"
+      ALLOWED_EMAILS: "clayton.shields87@gmail.com,candiceshields19@gmail.com"
+      DATA_DIR: /data
+      PORT: "8080"
+      TZ: America/New_York
+      # Litestream is OFF on QNAP — data lives on the volume mount above
+      LITESTREAM_ENABLED: "false"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
