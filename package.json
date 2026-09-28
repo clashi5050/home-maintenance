@@ -15,7 +15,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",
     "@azure/identity": "^4.13.3",
-    "@azure/storage-blob": "^12.33.0"
+    "@azure/storage-blob": "^12.34.0"
   },
   "devDependencies": {
     "azurite": "^3.37.0"
