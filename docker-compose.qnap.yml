@@ -1,8 +1,18 @@
 # QNAP Container Station deployment
 #
-# 1. Copy this file to your QNAP (e.g. /share/Container/home-maintenance/)
-# 2. In Container Station → Create → Create Application, import this file
-# 3. Set the BASIC_AUTH value below to "yourname:yourpassword"
+# Secrets (the login) live in a .env file next to this compose file, never in this file.
+# This repo is public: do not put real values here or commit .env.
+#
+# 1. On the QNAP, create the folder /share/Container/home-maintenance/ and copy this file into it.
+# 2. Copy .env.example from the repo to the same folder as .env, then edit .env:
+#      BASIC_AUTH=yourname:a-long-unique-password
+#    (ALLOWED_EMAILS is only used with AUTH_MODE=easyauth and can stay empty here.)
+#    Lock it down over SSH:  chmod 600 /share/Container/home-maintenance/.env
+# 3. Start it from that folder over SSH:
+#      cd /share/Container/home-maintenance
+#      docker compose -f docker-compose.qnap.yml up -d
+#    If you create the app through Container Station → Applications instead, point it at this
+#    same folder so it finds .env. The container won't start if .env is missing or has no BASIC_AUTH.
 #
 # Data lives at /share/Container/home-maintenance/data on the QNAP.
 # The SQLite database and uploaded documents survive container restarts.
@@ -10,6 +20,8 @@
 # To update the app: pull the new image and recreate the container.
 #   docker compose -f docker-compose.qnap.yml pull
 #   docker compose -f docker-compose.qnap.yml up -d
+#
+# To change the password: edit .env, then run the `up -d` command above (a restart alone won't reload .env).
 
 services:
   home-maintenance:
@@ -20,11 +32,11 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/data
+    # BASIC_AUTH and ALLOWED_EMAILS come from here. See .env.example.
+    env_file:
+      - .env
     environment:
       AUTH_MODE: basic
-      # Format: "username:password"  — change this before deploying
-      BASIC_AUTH: "admin:shields"
-      ALLOWED_EMAILS: "clayton.shields87@gmail.com,candiceshields19@gmail.com"
       DATA_DIR: /data
       PORT: "8080"
       TZ: America/New_York

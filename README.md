@@ -67,6 +67,16 @@ The first start loads your starter list from `seed.json` (edit it before the fir
 
 **Upgrading** to a new version keeps your data. The database upgrades itself on start, and your documents are in the same volume.
 
+### With a login (`docker-compose.qnap.yml`)
+
+`docker-compose.qnap.yml` turns on the `BASIC_AUTH` login. It reads the login from a `.env` file next to it, so no password ever goes in the compose file or in git.
+
+1. On the NAS, create `/share/Container/home-maintenance/` and copy `docker-compose.qnap.yml` into it.
+2. Copy `.env.example` to the same folder as `.env` and set `BASIC_AUTH=yourname:a-long-unique-password`. Then over SSH run `chmod 600 .env`.
+3. From that folder, run `docker compose -f docker-compose.qnap.yml up -d`. If you use Container Station > **Applications** instead, point it at the same folder so it finds `.env`.
+
+The container won't start without `.env` or with `BASIC_AUTH` missing. To change the password, edit `.env` and run the `up -d` command again. `.env` is git-ignored; only `.env.example` (placeholders) belongs in the repo.
+
 ## Deploy on K3s (Kubernetes)
 
 Either run `kubectl apply -f deploy/k8s/home-maintenance.yaml` or upload the file in the Kubernetes Dashboard under **Create > Create from file**.
