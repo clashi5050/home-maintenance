@@ -19,3 +19,8 @@ override.tf.json
 *.auto.tfvars
 *.tfvars.json
 !*.example.tfvars
+
+# Local secrets (docker compose). Only .env.example (placeholders) may be committed.
+.env
+.env.*
+!.env.example
